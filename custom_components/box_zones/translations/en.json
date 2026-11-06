@@ -1,0 +1,23 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Box Zones",
+        "description": "Pick the trackers to follow, for example your car or phone. Each one gets a location entity that shows the name of the box it is in.\n\nDraw your boxes afterwards on the **Box Zones** page in the sidebar. You can change the trackers there too.",
+        "data": { "trackers": "Trackers" }
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Box Zones is already set up. Open the Box Zones page in the sidebar."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Box Zones",
+        "description": "Pick the trackers to follow.",
+        "data": { "trackers": "Trackers" }
+      }
+    }
+  }
+}
