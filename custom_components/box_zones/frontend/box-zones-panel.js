@@ -444,6 +444,7 @@ class BoxZonesPanel extends HTMLElement {
         h("button", { class: "primary", onclick: () => this._save(), disabled: this._busy }, "Save"),
         h("button", { onclick: () => this._cancel(), disabled: this._busy }, "Cancel"),
         h("span", { class: "spacer" }),
+        m.isNew ? null : h("button", { onclick: () => this._duplicate(), disabled: this._busy, title: "Make a copy next to this box" }, "Duplicate"),
         m.isNew ? null : h("button", { class: "danger", onclick: () => this._delete(), disabled: this._busy }, "Delete")));
     if (m.isNew) setTimeout(() => { name.focus(); name.select(); }, 50);
     return [view];
@@ -499,6 +500,22 @@ class BoxZonesPanel extends HTMLElement {
     this._error = "";
     this._render();
     this._syncMap();
+  }
+
+  /** A copy of the box being edited, right next to it, opened as a new box. */
+  _duplicate() {
+    const d = this._mode.draft;
+    if (!d || this._busy) return;
+    const gap = Math.max(1, d.width_m * 0.1);
+    const p = G.localToGeo(d, d.width_m + gap, 0);
+    const draft = { ...d, id: G.newId(), name: G.nextName(d.name.trim() || "Box", this._zones.map((z) => z.name)), lat: p.lat, lon: p.lon };
+    this._mode = { view: "edit", draft, isNew: true };
+    this._error = "";
+    this._render();
+    this._syncMap();
+    // Show the original and the copy together.
+    const bounds = this._L.latLngBounds([...G.corners(d), ...G.corners(draft)].map((c) => [c.lat, c.lon]));
+    if (!this._map.getBounds().pad(-0.05).contains(bounds)) this._map.fitBounds(bounds, { padding: [70, 70], maxZoom: 22 });
   }
 
   _edit(id) {

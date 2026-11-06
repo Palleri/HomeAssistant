@@ -80,6 +80,8 @@ To trigger when the car leaves, use `from: Parking` instead.
   "Neighbourhood" box around your home shows "Home" when you're home.
 - **Zone conditions keep working:** "car is in Home" is still true while the
   car is in a box inside your Home zone.
+- **Duplicate:** open a box and press **Duplicate** to get a copy of the same
+  size and turn right next to it (handy for a row of parking spots).
 - **Same name, more boxes:** several boxes can share one name, for example two
   spots that both count as `Parking`.
 - **More trackers:** one Box Zones follows as many trackers as you like. Add

@@ -137,6 +137,16 @@ export function rotateHandlePx(center, topMid, rotationDeg, offset = 36) {
   return { x: topMid.x + (dx / len) * offset, y: topMid.y + (dy / len) * offset };
 }
 
+/** "Parking" -> "Parking 2", "Spot 2" -> "Spot 3": the first name that isn't taken. */
+export function nextName(name, taken) {
+  const used = new Set(taken);
+  const m = /^(.*?)\s+(\d+)$/.exec(name);
+  const base = m ? m[1] : name;
+  let n = m ? Number(m[2]) + 1 : 2;
+  while (used.has(`${base} ${n}`)) n++;
+  return `${base} ${n}`;
+}
+
 /** A round, friendly number of metres. */
 export function niceMetres(m) {
   if (m < 20) return Math.max(MIN_SIZE_M, Math.round(m));
