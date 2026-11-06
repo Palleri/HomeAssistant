@@ -21,6 +21,8 @@ class ZoneStore:
         self.zones: list[dict[str, Any]] = []
         # The trackers the entities were created for (see __init__._async_reload).
         self.loaded_trackers: list[str] = []
+        # Last known position of each followed tracker: (name, lat, lon), or None.
+        self.positions: dict[str, tuple[str, float, float] | None] = {}
 
     async def async_load(self) -> None:
         data = await self._store.async_load() or {}

@@ -52,12 +52,20 @@ def contains(zone: dict[str, Any], lat: float, lon: float) -> bool:
             and abs(y) <= zone["height_m"] / 2 + EDGE_MARGIN_M)
 
 
+def find_zones(zones: list[dict[str, Any]], lat: float, lon: float) -> list[dict[str, Any]]:
+    """Every box the point is in, smallest first."""
+    return sorted((z for z in zones if contains(z, lat, lon)), key=lambda z: z["width_m"] * z["height_m"])
+
+
 def find_zone(zones: list[dict[str, Any]], lat: float, lon: float) -> dict[str, Any] | None:
     """The box the point is in. When boxes overlap, the smallest one wins."""
-    hits = [z for z in zones if contains(z, lat, lon)]
-    if not hits:
-        return None
-    return min(hits, key=lambda z: z["width_m"] * z["height_m"])
+    hits = find_zones(zones, lat, lon)
+    return hits[0] if hits else None
+
+
+def equivalent_radius(zone: dict[str, Any]) -> float:
+    """The radius of a circle with the box's area, to compare a box with round zones."""
+    return math.sqrt(zone["width_m"] * zone["height_m"] / math.pi)
 
 
 def _number(value: Any, field: str) -> float:

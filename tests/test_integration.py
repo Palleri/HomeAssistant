@@ -249,3 +249,88 @@ async def test_tracker_title_filled_in_when_it_appears(hass: HomeAssistant) -> N
     [sub] = entry.subentries.values()
     assert sub.title == "Car"
     assert hass.states.get(OURS).state == "not_home"
+
+
+from custom_components.box_zones.device_tracker import SUPPORTS_IN_ZONES  # noqa: E402
+
+BOX_SENSOR = "sensor.box_zones_parking"
+
+
+async def add_box(hass: HomeAssistant, client, **zone) -> str:
+    await client.send_json_auto_id({"type": "box_zones/save_zone", "zone": {**BOX, **zone}})
+    msg = await client.receive_json()
+    assert msg["success"], msg
+    await hass.async_block_till_done()
+    return msg["result"]["zone"]["id"]
+
+
+async def test_box_entity(hass: HomeAssistant, hass_ws_client) -> None:
+    car_at(hass, *HOME)
+    await setup(hass)
+    client = await hass_ws_client(hass)
+    zone_id = await add_box(hass, client)
+    box = hass.states.get(BOX_SENSOR)
+    assert box.name == "Parking"
+    assert box.state == "0"
+    assert box.attributes["box_id"] == zone_id
+    assert box.attributes["radius"] > 0
+
+    car_at(hass, 52.5163, 13.3777)
+    await hass.async_block_till_done()
+    box = hass.states.get(BOX_SENSOR)
+    assert box.state == "1" and box.attributes["trackers"] == ["Car"]
+
+    # Renaming keeps the entity; deleting removes it.
+    await add_box(hass, client, id=zone_id, name="Spot")
+    assert hass.states.get(BOX_SENSOR).name == "Spot"
+    assert hass.states.get(OURS).state == "Spot"
+    await client.send_json_auto_id({"type": "box_zones/delete_zone", "zone_id": zone_id})
+    assert (await client.receive_json())["success"]
+    await hass.async_block_till_done()
+    assert hass.states.get(BOX_SENSOR) is None
+    assert hass.states.get(OURS).state == "not_home"
+
+
+async def test_in_zones_and_no_deprecation_warning(hass: HomeAssistant, hass_ws_client, caplog) -> None:
+    car_at(hass, 52.5163, 13.3777)
+    await setup(hass)
+    client = await hass_ws_client(hass)
+    await add_box(hass, client)
+    state = hass.states.get(OURS)
+    assert state.state == "Parking"
+    if SUPPORTS_IN_ZONES:
+        assert state.attributes["in_zones"] == [BOX_SENSOR]
+    assert "deprecated" not in caplog.text
+
+
+async def test_smaller_of_box_and_zone_wins(hass: HomeAssistant, hass_ws_client) -> None:
+    """Home zone has a 100 m radius. A parking spot inside it wins; a big box around it doesn't."""
+    car_at(hass, *HOME)
+    await setup(hass)
+    client = await hass_ws_client(hass)
+    spot = await add_box(hass, client, name="Driveway", lat=HOME[0], lon=HOME[1], width_m=20, height_m=10)
+    assert hass.states.get(OURS).state == "Driveway"
+    await client.send_json_auto_id({"type": "box_zones/delete_zone", "zone_id": spot})
+    assert (await client.receive_json())["success"]
+    await add_box(hass, client, name="Neighbourhood", lat=HOME[0], lon=HOME[1], width_m=2000, height_m=2000)
+    await hass.async_block_till_done()
+    state = hass.states.get(OURS)
+    assert state.state == "home"
+    assert state.attributes["box_zone"] is None
+    if SUPPORTS_IN_ZONES:
+        assert set(state.attributes["in_zones"]) == {"sensor.box_zones_neighbourhood", "zone.home"}
+
+
+async def test_zone_condition_still_sees_home_inside_a_box(hass: HomeAssistant, hass_ws_client) -> None:
+    from homeassistant.helpers import condition
+
+    car_at(hass, *HOME)
+    await setup(hass)
+    client = await hass_ws_client(hass)
+    await add_box(hass, client, name="Driveway", lat=HOME[0], lon=HOME[1], width_m=20, height_m=10)
+    assert hass.states.get(OURS).state == "Driveway"
+    config = await condition.async_validate_condition_config(
+        hass, {"condition": "zone", "entity_id": OURS, "zone": "zone.home"}
+    )
+    check = await condition.async_from_config(hass, config)
+    assert check(hass)

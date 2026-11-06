@@ -18,7 +18,8 @@ from .config_flow import followed, tracker_subentry
 from .const import CONF_TRACKERS, DOMAIN
 from .store import ZoneStore
 
-PLATFORMS = [Platform.DEVICE_TRACKER]
+# Sensors first: the location entities refer to the box entities.
+PLATFORMS = [Platform.SENSOR, Platform.DEVICE_TRACKER]
 CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 type BoxZonesConfigEntry = ConfigEntry[ZoneStore]

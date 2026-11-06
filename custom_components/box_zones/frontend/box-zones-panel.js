@@ -50,6 +50,10 @@ const TILES = {
   },
 };
 const TILE_KEY = "box-zones-tiles";
+// Past the tiles' own detail (19) the map just enlarges them, which is fine for drawing.
+const MAX_ZOOM = 23;
+// How close (screen pixels) to the box's edge a drag turns the box instead of moving it.
+const EDGE_PX = { mouse: 10, touch: 20 };
 const EDIT_COLOR = "#ff9800";
 const DEVICE_COLOR = "#2e7d32";
 
@@ -76,7 +80,6 @@ function saveTileChoice(v) {
   try { localStorage.setItem(TILE_KEY, v); } catch (_) { /* private mode */ }
 }
 
-const ICON_MOVE = "M13,6V11H18V7.75L22.25,12L18,16.25V13H13V18H16.25L12,22.25L7.75,18H11V13H6V16.25L1.75,12L6,7.75V11H11V6H7.75L12,1.75L16.25,6H13Z";
 const ICON_ROTATE = "M16.89,15.5L18.31,16.89C19.21,15.73 19.76,14.39 19.93,13H17.91C17.77,13.87 17.43,14.72 16.89,15.5M13,17.9V19.92C14.39,19.75 15.74,19.21 16.9,18.31L15.46,16.87C14.71,17.41 13.87,17.76 13,17.9M19.93,11C19.76,9.61 19.21,8.27 18.31,7.11L16.89,8.53C17.43,9.28 17.77,10.13 17.91,11M15.55,5.55L11,1V4.07C7.06,4.56 4,7.92 4,12C4,16.08 7.05,19.44 11,19.93V17.91C8.16,17.43 6,14.97 6,12C6,9.03 8.16,6.57 11,6.09V10L15.55,5.55Z";
 const svgUrl = (path, color) =>
   `url("data:image/svg+xml,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='${color}' d='${path}'/></svg>`)}")`;
@@ -157,8 +160,8 @@ summary { cursor: pointer; color: var(--secondary-text-color); font-size: 14px; 
 .zb-h::after { content: ""; position: absolute; inset: 8px; background: #fff; border: 2px solid ${EDIT_COLOR}; border-radius: 3px;
   box-shadow: 0 1px 3px rgba(0,0,0,.4); }
 .zb-h-edge::after { inset: 9px; border-radius: 50%; }
-.zb-h-move::after { inset: 2px; border-radius: 50%; background: ${EDIT_COLOR} ${svgUrl(ICON_MOVE, "#fff")} center / 20px no-repeat; border-color: #fff; }
-.zb-h-rotate::after { inset: 3px; border-radius: 50%; background: #fff ${svgUrl(ICON_ROTATE, EDIT_COLOR)} center / 18px no-repeat; }
+.zb-cur-move, .zb-cur-move .leaflet-interactive { cursor: move !important; }
+.zb-cur-turn, .zb-cur-turn .leaflet-interactive { cursor: ${svgUrl(ICON_ROTATE, "#212121").replace(/"\)$/, '") 12 12')}, alias !important; }
 .zb-msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px; text-align: center;
   color: var(--secondary-text-color); }
 /* Our own display rules would otherwise beat the hidden attribute, leaving an invisible
@@ -260,12 +263,16 @@ class BoxZonesPanel extends HTMLElement {
 
   _createMap() {
     const L = this._L;
-    const map = L.map(this._mapEl, { zoomControl: true, maxZoom: 21, worldCopyJump: true });
+    const map = L.map(this._mapEl, {
+      zoomControl: true, maxZoom: MAX_ZOOM, worldCopyJump: true,
+      // Finer zoom steps for precise drawing.
+      zoomSnap: 0.25, zoomDelta: 0.5, wheelPxPerZoomLevel: 120,
+    });
     this._map = map;
     const layers = {};
     for (const [key, t] of Object.entries(TILES)) {
       layers[t.label] = L.tileLayer(t.url, {
-        maxZoom: 21, maxNativeZoom: 19, attribution: t.attribution,
+        maxZoom: MAX_ZOOM, maxNativeZoom: 19, attribution: t.attribution,
         // Home Assistant sends no Referer; OpenStreetMap blocks tiles without one.
         referrerPolicy: "origin",
       });
@@ -284,6 +291,11 @@ class BoxZonesPanel extends HTMLElement {
     const home = this._hass.config || {};
     map.setView([home.latitude || 0, home.longitude || 0], home.latitude ? 16 : 2);
     map.on("zoomend viewreset resize", () => { if (!this._drag) this._placeHandles(); });
+    // Capture phase: decide before Leaflet whether a drag moves/turns the box or pans the map.
+    this._mapEl.addEventListener("pointerdown", (e) => this._onPointerDown(e), true);
+    this._mapEl.addEventListener("pointermove", (e) => this._onPointerMove(e), true);
+    this._mapEl.addEventListener("pointerup", (e) => this._onPointerUp(e), true);
+    this._mapEl.addEventListener("pointercancel", (e) => this._onPointerUp(e), true);
     new ResizeObserver(() => map.invalidateSize()).observe(this._mapEl);
   }
 
@@ -421,11 +433,11 @@ class BoxZonesPanel extends HTMLElement {
       h("div", { class: "head" }, h("h2", {}, m.isNew ? "New box" : "Edit box")),
       h("label", { class: "field" }, "Name (this is what the location entity will show)", name),
       h("ol", { class: "steps" },
-        h("li", {}, "Drag the orange middle handle to move the box."),
-        h("li", {}, "Drag the corners or sides to change the size."),
-        h("li", {}, "Drag the round arrow to turn it.")),
+        h("li", {}, "Drag inside the box to move it."),
+        h("li", {}, "Drag the white squares and dots to change the size."),
+        h("li", {}, "Drag the box's edge to turn it. Grab far from the middle for fine turns; hold Shift for 15° steps.")),
       h("details", {}, h("summary", {}, "Exact size"),
-        h("div", { class: "row3" }, num("width_m", "Width (m)", "1"), num("height_m", "Height (m)", "1"), num("rotation_deg", "Turn (°)", "1"))),
+        h("div", { class: "row3" }, num("width_m", "Width (m)", "1"), num("height_m", "Height (m)", "1"), num("rotation_deg", "Turn (°)", "0.1"))),
       h("div", { class: "actions" },
         h("button", { class: "primary", onclick: () => this._save(), disabled: this._busy }, "Save"),
         h("button", { onclick: () => this._cancel(), disabled: this._busy }, "Cancel"),
@@ -501,7 +513,7 @@ class BoxZonesPanel extends HTMLElement {
     const b = map.latLngToContainerPoint(bounds.getSouthEast());
     const size = map.getSize();
     const small = Math.abs(b.x - a.x) < size.x / 3 && Math.abs(b.y - a.y) < size.y / 3;
-    if (small || !map.getBounds().contains(bounds)) map.fitBounds(bounds, { padding: [70, 70], maxZoom: 20 });
+    if (small || !map.getBounds().contains(bounds)) map.fitBounds(bounds, { padding: [70, 70], maxZoom: 22 });
   }
 
   _cancel() {
@@ -638,26 +650,23 @@ class BoxZonesPanel extends HTMLElement {
     const editing = this._mode.view === "edit" ? this._mode.draft : null;
     if (this._handles && (!editing || this._handles.id !== editing.id)) {
       for (const mk of Object.values(this._handles.markers)) mk.remove();
-      this._handles.line.remove();
       this._handles = null;
     }
     if (editing && !this._handles) {
       const markers = {};
-      for (const key of [...Object.keys(G.HANDLES), "move", "rotate"]) markers[key] = this._makeHandle(key).addTo(this._map);
-      const line = L.polyline([], { color: EDIT_COLOR, weight: 2, dashArray: "4 4", interactive: false }).addTo(this._map);
-      this._handles = { id: editing.id, markers, line };
+      for (const key of Object.keys(G.HANDLES)) markers[key] = this._makeHandle(key).addTo(this._map);
+      this._handles = { id: editing.id, markers };
     }
     this._placeHandles();
   }
 
   _makeHandle(key) {
     const L = this._L;
-    const cls = key === "move" ? "zb-h-move" : key === "rotate" ? "zb-h-rotate" : key.length === 1 ? "zb-h-edge" : "zb-h-corner";
-    const size = key === "move" ? 36 : 30;
+    const cls = key.length === 1 ? "zb-h-edge" : "zb-h-corner";
+    const size = 30;
     const mk = L.marker([0, 0], {
       icon: L.divIcon({ className: `zb-h ${cls}`, iconSize: [size, size] }),
-      draggable: true, autoPan: false, keyboard: false, zIndexOffset: key === "move" ? 1100 : 1000,
-      title: key === "move" ? "Move" : key === "rotate" ? "Turn" : "Resize",
+      draggable: true, autoPan: false, keyboard: false, zIndexOffset: 1000, title: "Resize",
     });
     mk.on("dragstart", () => {
       const d = this._mode.draft;
@@ -680,10 +689,7 @@ class BoxZonesPanel extends HTMLElement {
     const drag = this._drag;
     if (!d || !drag || drag.key !== key) return;
     const b = drag.base;
-    let next;
-    if (key === "move") next = { ...b, lat: b.lat + ll.lat - drag.start.lat, lon: b.lon + ll.lng - drag.start.lng };
-    else if (key === "rotate") next = { ...b, rotation_deg: G.rotationTo(b, ll.lat, ll.lng) };
-    else next = G.resize(b, key, ll.lat, ll.lng);
+    const next = G.resize(b, key, ll.lat, ll.lng);
     for (const f of ["lat", "lon", "width_m", "height_m", "rotation_deg"]) d[f] = next[f];
     this._syncZones();
     this._placeHandles(key);
@@ -693,21 +699,91 @@ class BoxZonesPanel extends HTMLElement {
   _placeHandles(skip) {
     if (!this._handles || this._mode.view !== "edit") return;
     const d = this._mode.draft;
-    const { markers, line } = this._handles;
-    const set = (key, lat, lon) => { if (key !== skip) markers[key].setLatLng([lat, lon]); };
     for (const [key, [sx, sy]] of Object.entries(G.HANDLES)) {
+      if (key === skip) continue;
       const p = G.localToGeo(d, (sx * d.width_m) / 2, (sy * d.height_m) / 2);
-      set(key, p.lat, p.lon);
+      this._handles.markers[key].setLatLng([p.lat, p.lon]);
     }
-    set("move", d.lat, d.lon);
-    const top = G.localToGeo(d, 0, d.height_m / 2);
+  }
+
+  // ---------------------------------------------- move and turn by dragging the box
+  /** "move" (inside the box), "turn" (on its edge) or null (let the map pan). */
+  _gestureAt(e) {
+    if (this._mode.view !== "edit" || !this._map) return null;
+    for (const n of e.composedPath()) {
+      if (n === this._mapEl) break;
+      // Resize handles and map controls handle their own events.
+      if (n.classList && (n.classList.contains("zb-h") || n.classList.contains("leaflet-control"))) return null;
+    }
+    const d = this._mode.draft;
+    const pt = this._map.mouseEventToContainerPoint(e);
+    const cs = G.corners(d).map((p) => this._map.latLngToContainerPoint([p.lat, p.lon]));
+    let edge = Infinity;
+    for (let i = 0; i < 4; i++) edge = Math.min(edge, G.distToSegment(pt, cs[i], cs[(i + 1) % 4]));
+    const inside = G.pointInPolygon(pt, cs);
+    const shortSide = Math.min(cs[0].distanceTo(cs[1]), cs[1].distanceTo(cs[2]));
+    const tol = e.pointerType === "touch" ? EDGE_PX.touch : EDGE_PX.mouse;
+    // On a box that is small on screen, keep the middle for moving.
+    if (inside && edge > Math.min(tol, shortSide / 4)) return "move";
+    if (edge <= tol) return "turn";
+    return null;
+  }
+
+  _onPointerDown(e) {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    const kind = this._gestureAt(e);
+    if (!kind) return;
+    // Keep Leaflet from panning the map, and the browser from sending mouse events too.
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    const d = this._mode.draft;
+    const pt = this._map.mouseEventToContainerPoint(e);
     const c = this._map.latLngToContainerPoint([d.lat, d.lon]);
-    const tp = this._map.latLngToContainerPoint([top.lat, top.lon]);
-    const rp = G.rotateHandlePx(c, tp, d.rotation_deg);
-    const rl = this._map.containerPointToLatLng([rp.x, rp.y]);
-    set("rotate", rl.lat, rl.lng);
-    const rot = skip === "rotate" ? markers.rotate.getLatLng() : rl;
-    line.setLatLngs([[top.lat, top.lon], [rot.lat, rot.lng]]);
+    this._gesture = {
+      kind, pointerId: e.pointerId, base: { ...d },
+      startLL: this._map.containerPointToLatLng(pt), center: c,
+      startAngle: Math.atan2(pt.y - c.y, pt.x - c.x),
+    };
+    this._mapEl.setPointerCapture(e.pointerId);
+  }
+
+  _onPointerMove(e) {
+    const g = this._gesture;
+    if (!g) {
+      if (e.pointerType === "mouse") {
+        const kind = this._gestureAt(e);
+        this._mapEl.classList.toggle("zb-cur-move", kind === "move");
+        this._mapEl.classList.toggle("zb-cur-turn", kind === "turn");
+      }
+      return;
+    }
+    if (e.pointerId !== g.pointerId) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    const d = this._mode.draft;
+    const pt = this._map.mouseEventToContainerPoint(e);
+    if (g.kind === "move") {
+      const ll = this._map.containerPointToLatLng(pt);
+      d.lat = g.base.lat + ll.lat - g.startLL.lat;
+      d.lon = g.base.lon + ll.lng - g.startLL.lng;
+    } else {
+      // Turn by how far the pointer went around the middle, not by where it points:
+      // no jump when you grab the edge, and finer control further from the middle.
+      const a = Math.atan2(pt.y - g.center.y, pt.x - g.center.x);
+      d.rotation_deg = G.turnBy(g.base.rotation_deg, G.toDeg(a - g.startAngle), e.shiftKey ? 15 : 0);
+    }
+    this._syncZones();
+    this._placeHandles();
+    this._updateFields();
+  }
+
+  _onPointerUp(e) {
+    const g = this._gesture;
+    if (!g || e.pointerId !== g.pointerId) return;
+    e.stopImmediatePropagation();
+    this._gesture = null;
+    if (this._mapEl.hasPointerCapture(e.pointerId)) this._mapEl.releasePointerCapture(e.pointerId);
+    this._updateFields();
   }
 
   _syncDevices() {
