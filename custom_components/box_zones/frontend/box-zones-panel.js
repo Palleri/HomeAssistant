@@ -161,6 +161,9 @@ summary { cursor: pointer; color: var(--secondary-text-color); font-size: 14px; 
 .zb-h-rotate::after { inset: 3px; border-radius: 50%; background: #fff ${svgUrl(ICON_ROTATE, EDIT_COLOR)} center / 18px no-repeat; }
 .zb-msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px; text-align: center;
   color: var(--secondary-text-color); }
+/* Our own display rules would otherwise beat the hidden attribute, leaving an invisible
+   layer over the map that swallows every drag. */
+[hidden] { display: none !important; }
 `;
 
 class BoxZonesPanel extends HTMLElement {

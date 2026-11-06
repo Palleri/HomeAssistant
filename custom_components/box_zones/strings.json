@@ -3,20 +3,28 @@
     "step": {
       "user": {
         "title": "Box Zones",
-        "description": "Pick the trackers to follow, for example your car or phone. Each one gets a location entity that shows the name of the box it is in.\n\nDraw your boxes afterwards on the **Box Zones** page in the sidebar. You can change the trackers there too.",
+        "description": "Pick the trackers to follow, for example your car or phone. Each one gets a location entity that shows the name of the box it is in.\n\nYou can add more trackers later with **Add tracker** on this integration's page, or on the **Box Zones** page in the sidebar. Draw your boxes there too.",
         "data": { "trackers": "Trackers" }
       }
     },
     "abort": {
-      "single_instance_allowed": "Box Zones is already set up. Open the Box Zones page in the sidebar."
+      "single_instance_allowed": "Box Zones is already set up. To follow another tracker, open Box Zones under Devices & services and press Add tracker."
     }
   },
-  "options": {
-    "step": {
-      "init": {
-        "title": "Box Zones",
-        "description": "Pick the trackers to follow.",
-        "data": { "trackers": "Trackers" }
+  "config_subentries": {
+    "tracker": {
+      "entry_type": "Tracker",
+      "initiate_flow": { "user": "Add tracker" },
+      "step": {
+        "user": {
+          "title": "Add tracker",
+          "description": "Pick a tracker to follow. It gets a location entity that shows the name of the box it is in.",
+          "data": { "entity_id": "Tracker" }
+        }
+      },
+      "abort": {
+        "already_configured": "This tracker is already followed.",
+        "not_a_tracker": "Pick a device tracker. Box Zones' own location entities can't be followed."
       }
     }
   }

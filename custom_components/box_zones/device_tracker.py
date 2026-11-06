@@ -20,7 +20,8 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.event import async_track_state_change_event
 
 from . import BoxZonesConfigEntry
-from .const import CONF_TRACKERS, ENTITY_SUFFIX, SIGNAL_ZONES_UPDATED
+from .config_flow import followed
+from .const import CONF_ENTITY_ID, ENTITY_SUFFIX, SIGNAL_ZONES_UPDATED, SUBENTRY_TRACKER
 from .geometry import find_zone
 from .store import ZoneStore
 
@@ -36,13 +37,18 @@ async def async_setup_entry(
     entry: BoxZonesConfigEntry,
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
-    trackers = entry.options.get(CONF_TRACKERS, [])
+    trackers = followed(entry)
     # Remove the entities of trackers that are no longer followed.
     registry = er.async_get(hass)
     for entity in er.async_entries_for_config_entry(registry, entry.entry_id):
         if entity.domain == "device_tracker" and entity.unique_id not in trackers:
             registry.async_remove(entity.entity_id)
-    async_add_entities(BoxZonesTracker(entry.runtime_data, source) for source in trackers)
+    for sub in entry.subentries.values():
+        if sub.subentry_type == SUBENTRY_TRACKER:
+            async_add_entities(
+                [BoxZonesTracker(entry, sub.subentry_id, sub.data[CONF_ENTITY_ID])],
+                config_subentry_id=sub.subentry_id,
+            )
 
 
 def our_entity_id(source: str) -> str:
@@ -72,8 +78,10 @@ class BoxZonesTracker(TrackerEntity):
     _attr_source_type = SourceType.GPS
     _attr_icon = "mdi:map-marker-radius"
 
-    def __init__(self, store: ZoneStore, source: str) -> None:
-        self._store = store
+    def __init__(self, entry: BoxZonesConfigEntry, subentry_id: str, source: str) -> None:
+        self._entry = entry
+        self._subentry_id = subentry_id
+        self._store: ZoneStore = entry.runtime_data
         self._source = source
         self._attr_unique_id = source
         self.entity_id = our_entity_id(source)
@@ -113,7 +121,10 @@ class BoxZonesTracker(TrackerEntity):
             self._attr_location_name = None
             return
         self._attr_available = True
-        self._attr_name = f"{state.attributes.get(ATTR_FRIENDLY_NAME) or self._source} (Box Zones)"
+        friendly = state.attributes.get(ATTR_FRIENDLY_NAME)
+        self._attr_name = f"{friendly or self._source} (Box Zones)"
+        if friendly:
+            self._name_subentry(friendly)
         lat = _coordinate(state.attributes.get(ATTR_LATITUDE))
         lon = _coordinate(state.attributes.get(ATTR_LONGITUDE))
         accuracy = next(
@@ -139,6 +150,13 @@ class BoxZonesTracker(TrackerEntity):
         self._box = find_zone(self._store.zones, lat, lon)
         # None lets Home Assistant pick home / not_home / one of its own zones.
         self._attr_location_name = self._box["name"] if self._box else None
+
+    @callback
+    def _name_subentry(self, friendly: str) -> None:
+        """A tracker added before its integration had loaded is titled by its entity ID: fix that."""
+        sub = self._entry.subentries.get(self._subentry_id)
+        if sub is not None and sub.title == self._source and self.hass is not None:
+            self.hass.config_entries.async_update_subentry(self._entry, sub, title=friendly)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

@@ -2,10 +2,13 @@
 
 from homeassistant import config_entries
 from homeassistant.core import HomeAssistant
-from homeassistant.data_entry_flow import FlowResultType
+import pytest
+
+from homeassistant.data_entry_flow import FlowResultType, InvalidData
 from homeassistant.setup import async_setup_component
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.box_zones.config_flow import tracker_subentry
 from custom_components.box_zones.const import CONF_TRACKERS, DOMAIN
 
 CAR = "device_tracker.car"
@@ -22,7 +25,10 @@ def car_at(hass: HomeAssistant, lat: float, lon: float, **extra) -> None:
 async def setup(hass: HomeAssistant, trackers=(CAR,)) -> MockConfigEntry:
     hass.config.latitude, hass.config.longitude = HOME
     assert await async_setup_component(hass, "zone", {})
-    entry = MockConfigEntry(domain=DOMAIN, title="Box Zones", data={}, options={CONF_TRACKERS: list(trackers)})
+    entry = MockConfigEntry(
+        domain=DOMAIN, title="Box Zones", data={}, version=1, minor_version=2,
+        subentries_data=[tracker_subentry(hass, t) for t in trackers],
+    )
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
@@ -35,7 +41,10 @@ async def test_config_flow_creates_entry(hass: HomeAssistant) -> None:
     assert result["type"] is FlowResultType.FORM
     result = await hass.config_entries.flow.async_configure(result["flow_id"], {CONF_TRACKERS: [CAR]})
     assert result["type"] is FlowResultType.CREATE_ENTRY
-    assert result["options"] == {CONF_TRACKERS: [CAR]}
+    entry = result["result"]
+    assert [(s.subentry_type, dict(s.data), s.title) for s in entry.subentries.values()] == [
+        ("tracker", {"entity_id": CAR}, "Car")
+    ]
     await hass.async_block_till_done()
     assert hass.states.get(OURS) is not None
     # Only one Box Zones can be set up.
@@ -184,3 +193,59 @@ async def test_no_position_is_logged(hass: HomeAssistant, caplog) -> None:
     await setup(hass)
     assert hass.states.get(OURS).state == "not_home"
     assert "has no usable latitude/longitude" in caplog.text
+
+
+async def test_add_tracker_on_the_integration_page(hass: HomeAssistant) -> None:
+    car_at(hass, 1, 1)
+    hass.states.async_set("device_tracker.phone", "home", {"latitude": 2, "longitude": 2, "friendly_name": "Phone"})
+    entry = await setup(hass)
+    result = await hass.config_entries.subentries.async_init((entry.entry_id, "tracker"), context={"source": "user"})
+    assert result["type"] is FlowResultType.FORM
+    result = await hass.config_entries.subentries.async_configure(result["flow_id"], {"entity_id": "device_tracker.phone"})
+    assert result["type"] is FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
+    assert hass.states.get("device_tracker.phone_box_zones") is not None
+    assert hass.states.get(OURS) is not None
+    # A followed tracker isn't offered again (the picker excludes it).
+    result = await hass.config_entries.subentries.async_init((entry.entry_id, "tracker"), context={"source": "user"})
+    with pytest.raises(InvalidData):
+        await hass.config_entries.subentries.async_configure(result["flow_id"], {"entity_id": CAR})
+    # Deleting the sub-entry removes the entity.
+    sub_id = next(s.subentry_id for s in entry.subentries.values() if s.data["entity_id"] == "device_tracker.phone")
+    assert hass.config_entries.async_remove_subentry(entry, sub_id)
+    await hass.async_block_till_done()
+    assert hass.states.get("device_tracker.phone_box_zones") is None
+    assert hass.states.get(OURS) is not None
+
+
+async def test_migrates_trackers_from_options(hass: HomeAssistant) -> None:
+    """0.1.x kept the trackers in the options. The entity keeps its ID."""
+    car_at(hass, 1, 1)
+    hass.config.latitude, hass.config.longitude = HOME
+    assert await async_setup_component(hass, "zone", {})
+    entry = MockConfigEntry(domain=DOMAIN, title="Box Zones", data={}, version=1, minor_version=1,
+                            options={CONF_TRACKERS: [CAR]})
+    entry.add_to_hass(hass)
+    from homeassistant.helpers import entity_registry as er
+    old = er.async_get(hass).async_get_or_create("device_tracker", DOMAIN, CAR, config_entry=entry,
+                                                  suggested_object_id="car_box_zones")
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.minor_version == 2 and CONF_TRACKERS not in entry.options
+    [sub] = entry.subentries.values()
+    assert sub.data == {"entity_id": CAR}
+    reg = er.async_get(hass).async_get(OURS)
+    assert reg.id == old.id and reg.config_subentry_id == sub.subentry_id
+    assert hass.states.get(OURS).state == "not_home"
+
+
+async def test_tracker_title_filled_in_when_it_appears(hass: HomeAssistant) -> None:
+    """Added before the car's integration loaded: titled by entity ID, then renamed."""
+    entry = await setup(hass)
+    [sub] = entry.subentries.values()
+    assert sub.title == CAR
+    car_at(hass, 1, 1)
+    await hass.async_block_till_done()
+    [sub] = entry.subentries.values()
+    assert sub.title == "Car"
+    assert hass.states.get(OURS).state == "not_home"
