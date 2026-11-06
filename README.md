@@ -70,8 +70,10 @@ To trigger when the car leaves, use `from: Parking` instead.
   a "Street" box shows "Parking spot" when the car is in the spot.
 - **Same name, more boxes:** several boxes can share one name, for example two
   spots that both count as `Parking`.
-- **Change trackers:** on the Box Zones page under **Followed trackers**, or in
-  Settings → Devices & services → Box Zones → **Configure**.
+- **More trackers:** one Box Zones follows as many trackers as you like. Add
+  one with **Add tracker** on Settings → Devices & services → Box Zones, or
+  with **Change** under **Followed trackers** on the Box Zones page. To stop
+  following one, delete it from the integration's page or untick it there.
 - **Map:** the background map comes from OpenStreetMap; the layer button on
   the map switches to satellite images (Esri), which helps when drawing
   parking spots. Everything else runs locally in Home Assistant.
@@ -96,3 +98,10 @@ The box maths exists twice, in `geometry.py` (for the entities) and
 MIT, see [LICENSE](LICENSE). The bundled map library
 [Leaflet](https://leafletjs.com) has its own BSD-2-Clause license in
 `custom_components/box_zones/frontend/leaflet/LICENSE`.
+
+## Releasing
+
+Change `version` in `custom_components/box_zones/manifest.json` and `VERSION`
+in `const.py` (a test checks they match), then merge to `main`. The Release
+workflow creates the GitHub release, for example `v0.1.2`, and HACS offers it
+as an update.

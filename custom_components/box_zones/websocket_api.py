@@ -7,12 +7,12 @@ from typing import Any
 import voluptuous as vol
 
 from homeassistant.components import websocket_api
-from homeassistant.config_entries import ConfigEntry, ConfigEntryState
+from homeassistant.config_entries import ConfigEntry, ConfigEntryState, ConfigSubentry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import entity_registry as er
 
-from .config_flow import clean_trackers
-from .const import CONF_TRACKERS, DOMAIN, VERSION
+from .config_flow import clean_trackers, followed, tracker_subentry
+from .const import CONF_ENTITY_ID, DOMAIN, SUBENTRY_TRACKER, VERSION
 from .geometry import MAX_SIZE_M, MIN_SIZE_M, ZoneError
 from .store import ZoneStore
 
@@ -36,7 +36,7 @@ def _payload(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
     registry = er.async_get(hass)
     trackers = [
         {"source": source, "entity_id": registry.async_get_entity_id("device_tracker", DOMAIN, source)}
-        for source in entry.options.get(CONF_TRACKERS, [])
+        for source in followed(entry)
     ]
     return {
         "version": VERSION,
@@ -103,8 +103,15 @@ async def ws_set_trackers(hass: HomeAssistant, connection: websocket_api.ActiveC
         return
     trackers = clean_trackers(hass, msg["trackers"])
     # Reload here (not in the update listener) so the new entities exist when we answer.
-    entry.runtime_data.loaded_trackers = trackers
-    hass.config_entries.async_update_entry(entry, options={**entry.options, CONF_TRACKERS: trackers})
+    entry.runtime_data.loaded_trackers = [t for t in followed(entry) if t in trackers] + [
+        t for t in trackers if t not in followed(entry)
+    ]
+    for sub in list(entry.subentries.values()):
+        if sub.subentry_type == SUBENTRY_TRACKER and sub.data[CONF_ENTITY_ID] not in trackers:
+            hass.config_entries.async_remove_subentry(entry, sub.subentry_id)
+    for source in trackers:
+        if source not in followed(entry):
+            hass.config_entries.async_add_subentry(entry, ConfigSubentry(**tracker_subentry(hass, source)))
     await hass.config_entries.async_reload(entry.entry_id)
     entry = _entry(hass)
     if entry is None:

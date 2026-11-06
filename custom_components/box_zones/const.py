@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 DOMAIN = "box_zones"
-VERSION = "0.1.1"
+VERSION = "0.2.0"
 
 CONF_TRACKERS = "trackers"
+CONF_ENTITY_ID = "entity_id"
+SUBENTRY_TRACKER = "tracker"
 
 STORAGE_KEY = "box_zones.zones"
 STORAGE_VERSION = 1
