@@ -81,3 +81,9 @@ test("edge distance and inside test in screen pixels", () => {
   assert.ok(G.pointInPolygon({ x: 50, y: 25 }, sq));
   assert.ok(!G.pointInPolygon({ x: 150, y: 25 }, sq));
 });
+
+test("a duplicate gets the next free name", () => {
+  assert.equal(G.nextName("Parking", ["Parking"]), "Parking 2");
+  assert.equal(G.nextName("Parking", ["Parking", "Parking 2"]), "Parking 3");
+  assert.equal(G.nextName("Spot 2", ["Spot 2", "Spot 3"]), "Spot 4");
+});

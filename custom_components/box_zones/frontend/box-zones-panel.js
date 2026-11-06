@@ -444,6 +444,7 @@ class BoxZonesPanel extends HTMLElement {
         h("button", { class: "primary", onclick: () => this._save(), disabled: this._busy }, "Save"),
         h("button", { onclick: () => this._cancel(), disabled: this._busy }, "Cancel"),
         h("span", { class: "spacer" }),
+        m.isNew ? null : h("button", { onclick: () => this._duplicate(), disabled: this._busy, title: "Make a copy next to this box" }, "Duplicate"),
         m.isNew ? null : h("button", { class: "danger", onclick: () => this._delete(), disabled: this._busy }, "Delete")));
     if (m.isNew) setTimeout(() => { name.focus(); name.select(); }, 50);
     return [view];
@@ -499,6 +500,22 @@ class BoxZonesPanel extends HTMLElement {
     this._error = "";
     this._render();
     this._syncMap();
+  }
+
+  /** A copy of the box being edited, right next to it, opened as a new box. */
+  _duplicate() {
+    const d = this._mode.draft;
+    if (!d || this._busy) return;
+    const gap = Math.max(1, d.width_m * 0.1);
+    const p = G.localToGeo(d, d.width_m + gap, 0);
+    const draft = { ...d, id: G.newId(), name: G.nextName(d.name.trim() || "Box", this._zones.map((z) => z.name)), lat: p.lat, lon: p.lon };
+    this._mode = { view: "edit", draft, isNew: true };
+    this._error = "";
+    this._render();
+    this._syncMap();
+    // Show the original and the copy together.
+    const bounds = this._L.latLngBounds([...G.corners(d), ...G.corners(draft)].map((c) => [c.lat, c.lon]));
+    if (!this._map.getBounds().pad(-0.05).contains(bounds)) this._map.fitBounds(bounds, { padding: [70, 70], maxZoom: 22 });
   }
 
   _edit(id) {
@@ -723,7 +740,9 @@ class BoxZonesPanel extends HTMLElement {
     const c = this._map.latLngToContainerPoint([d.lat, d.lon]);
     const tp = this._map.latLngToContainerPoint([top.lat, top.lon]);
     const rp = G.rotateHandlePx(c, tp, d.rotation_deg);
-    const rl = this._map.containerPointToLatLng([rp.x, rp.y]);
+    // While the turn button is dragged it follows the pointer: pull it further out for finer turns.
+    const g = this._gesture;
+    const rl = g && g.fromButton && g.pointLL ? g.pointLL : this._map.containerPointToLatLng([rp.x, rp.y]);
     this._handles.markers.rotate.setLatLng(rl);
     this._handles.line.setLatLngs([[top.lat, top.lon], rl]);
   }
@@ -762,8 +781,9 @@ class BoxZonesPanel extends HTMLElement {
     const d = this._mode.draft;
     const pt = this._map.mouseEventToContainerPoint(e);
     const c = this._map.latLngToContainerPoint([d.lat, d.lon]);
+    const fromButton = e.composedPath().some((n) => n.classList && n.classList.contains("zb-h-rotate"));
     this._gesture = {
-      kind, pointerId: e.pointerId, base: { ...d },
+      kind, fromButton, pointerId: e.pointerId, base: { ...d },
       startLL: this._map.containerPointToLatLng(pt), center: c,
       startAngle: Math.atan2(pt.y - c.y, pt.x - c.x),
     };
@@ -785,6 +805,7 @@ class BoxZonesPanel extends HTMLElement {
     e.stopImmediatePropagation();
     const d = this._mode.draft;
     const pt = this._map.mouseEventToContainerPoint(e);
+    g.pointLL = this._map.containerPointToLatLng(pt);
     if (g.kind === "move") {
       const ll = this._map.containerPointToLatLng(pt);
       d.lat = g.base.lat + ll.lat - g.startLL.lat;
@@ -806,6 +827,7 @@ class BoxZonesPanel extends HTMLElement {
     e.stopImmediatePropagation();
     this._gesture = null;
     if (this._mapEl.hasPointerCapture(e.pointerId)) this._mapEl.releasePointerCapture(e.pointerId);
+    this._placeHandles(); // the turn button goes back next to the box
     this._updateFields();
   }
 
