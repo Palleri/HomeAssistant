@@ -82,7 +82,8 @@ const svgUrl = (path, color) =>
   `url("data:image/svg+xml,${encodeURIComponent(`<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'><path fill='${color}' d='${path}'/></svg>`)}")`;
 
 const CSS = `
-:host { display: block; height: 100%; background: var(--primary-background-color); color: var(--primary-text-color);
+/* Size to the window: some Home Assistant versions don't give panels a fixed height. */
+:host { display: block; height: 100vh; height: 100dvh; background: var(--primary-background-color); color: var(--primary-text-color);
   font-family: var(--ha-font-family-body, Roboto, Noto, sans-serif); -webkit-font-smoothing: antialiased; }
 * { box-sizing: border-box; }
 .layout { display: flex; flex-direction: column; height: 100%; }
