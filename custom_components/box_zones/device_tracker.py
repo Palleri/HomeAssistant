@@ -7,6 +7,7 @@ one of Home Assistant's own round zones.
 
 from __future__ import annotations
 
+import logging
 import math
 from typing import Any
 
@@ -22,6 +23,8 @@ from . import BoxZonesConfigEntry
 from .const import CONF_TRACKERS, ENTITY_SUFFIX, SIGNAL_ZONES_UPDATED
 from .geometry import find_zone
 from .store import ZoneStore
+
+_LOGGER = logging.getLogger(__name__)
 
 ATTR_SOURCE = "source_entity"
 ATTR_BOX = "box_zone"
@@ -48,9 +51,18 @@ def our_entity_id(source: str) -> str:
 
 
 def _coordinate(value: Any) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+    """A number, also when the tracker sends it as text ("59.26")."""
+    if value is None or isinstance(value, bool):
         return None
-    return float(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+# Trackers name their GPS accuracy differently.
+ACCURACY_ATTRIBUTES = ("gps_accuracy", "accuracy", "horizontal_accuracy")
 
 
 class BoxZonesTracker(TrackerEntity):
@@ -67,6 +79,7 @@ class BoxZonesTracker(TrackerEntity):
         self.entity_id = our_entity_id(source)
         self._attr_name = f"{source} (Box Zones)"
         self._box: dict[str, Any] | None = None
+        self._warned_no_position = False
 
     @property
     def force_update(self) -> bool:
@@ -103,13 +116,26 @@ class BoxZonesTracker(TrackerEntity):
         self._attr_name = f"{state.attributes.get(ATTR_FRIENDLY_NAME) or self._source} (Box Zones)"
         lat = _coordinate(state.attributes.get(ATTR_LATITUDE))
         lon = _coordinate(state.attributes.get(ATTR_LONGITUDE))
-        accuracy = _coordinate(state.attributes.get("gps_accuracy"))
+        accuracy = next(
+            (a for key in ACCURACY_ATTRIBUTES if (a := _coordinate(state.attributes.get(key))) is not None),
+            None,
+        )
         self._attr_location_accuracy = accuracy if accuracy is not None and accuracy >= 0 else 0
         self._attr_latitude, self._attr_longitude = lat, lon
         if lat is None or lon is None:
             # No position (for example a router-based tracker): pass its state through.
+            if not self._warned_no_position:
+                _LOGGER.warning(
+                    "%s has no usable latitude/longitude (got %r, %r), so Box Zones can't "
+                    "tell which box it is in. Its state is passed through instead",
+                    self._source,
+                    state.attributes.get(ATTR_LATITUDE),
+                    state.attributes.get(ATTR_LONGITUDE),
+                )
+                self._warned_no_position = True
             self._attr_location_name = state.state
             return
+        self._warned_no_position = False
         self._box = find_zone(self._store.zones, lat, lon)
         # None lets Home Assistant pick home / not_home / one of its own zones.
         self._attr_location_name = self._box["name"] if self._box else None

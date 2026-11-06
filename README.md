@@ -96,3 +96,10 @@ The box maths exists twice, in `geometry.py` (for the entities) and
 MIT, see [LICENSE](LICENSE). The bundled map library
 [Leaflet](https://leafletjs.com) has its own BSD-2-Clause license in
 `custom_components/box_zones/frontend/leaflet/LICENSE`.
+
+## Releasing
+
+Change `version` in `custom_components/box_zones/manifest.json` and `VERSION`
+in `const.py` (a test checks they match), then merge to `main`. The Release
+workflow creates the GitHub release, for example `v0.1.2`, and HACS offers it
+as an update.

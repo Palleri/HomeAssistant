@@ -163,3 +163,24 @@ async def test_unfollowed_tracker_entity_is_removed(hass: HomeAssistant, hass_ws
     assert hass.states.get(OURS) is None
     from homeassistant.helpers import entity_registry as er
     assert er.async_get(hass).async_get(OURS) is None
+
+
+async def test_position_sent_as_text(hass: HomeAssistant, hass_ws_client) -> None:
+    """Some trackers send numbers as text and call the accuracy something else."""
+    hass.states.async_set(CAR, "not_home", {"latitude": "52.5163", "longitude": "13.3777", "accuracy": "8"})
+    await setup(hass)
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id({"type": "box_zones/save_zone", "zone": BOX})
+    assert (await client.receive_json())["success"]
+    await hass.async_block_till_done()
+    state = hass.states.get(OURS)
+    assert state.state == "Parking"
+    assert state.attributes["latitude"] == 52.5163
+    assert state.attributes["gps_accuracy"] == 8
+
+
+async def test_no_position_is_logged(hass: HomeAssistant, caplog) -> None:
+    hass.states.async_set(CAR, "not_home", {"latitude": "unknown"})
+    await setup(hass)
+    assert hass.states.get(OURS).state == "not_home"
+    assert "has no usable latitude/longitude" in caplog.text
