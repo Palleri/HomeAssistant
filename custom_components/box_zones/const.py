@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 DOMAIN = "box_zones"
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 
 CONF_TRACKERS = "trackers"
 CONF_ENTITY_ID = "entity_id"
