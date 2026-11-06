@@ -64,3 +64,20 @@ test("corners are half the size away from the centre", () => {
   const b = G.geoToLocal(BOX, br.lat, br.lon);
   close(Math.hypot(a.x, a.y), Math.hypot(50, 20)); close(Math.hypot(b.x, b.y), Math.hypot(50, 20));
 });
+
+test("turning is smooth: 0.1° steps, no jump, optional snapping", () => {
+  assert.equal(G.turnBy(30, 0.04), 30);
+  assert.equal(G.turnBy(30, 0.26), 30.3);
+  assert.equal(G.turnBy(350, 15), 5);
+  assert.equal(G.turnBy(30, -40), 350);
+  assert.equal(G.turnBy(30, 9, 15), 45);
+  assert.equal(G.turnBy(30, 6, 15), 30);
+});
+
+test("edge distance and inside test in screen pixels", () => {
+  const sq = [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 50 }, { x: 0, y: 50 }];
+  assert.equal(G.distToSegment({ x: 50, y: -8 }, sq[0], sq[1]), 8);
+  assert.equal(G.distToSegment({ x: 130, y: 0 }, sq[0], sq[1]), 30);
+  assert.ok(G.pointInPolygon({ x: 50, y: 25 }, sq));
+  assert.ok(!G.pointInPolygon({ x: 150, y: 25 }, sq));
+});

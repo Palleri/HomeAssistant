@@ -15,8 +15,9 @@ instead.
 2. **Set it up:**
    [![Add integration](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=box_zones)
    Pick the trackers to follow, for example your car.
-3. **Draw a box:** open **Box Zones** in the sidebar, press **New box**, drag
-   it into place, give it a name and press **Save**.
+3. **Draw a box:** open **Box Zones** in the sidebar, press **New box**, give
+   it a name and press **Save**. Drag inside the box to move it, the corners
+   and side dots to resize it, and its edge to turn it.
 
 That's it.
 
@@ -48,6 +49,10 @@ The entity shows:
 It works anywhere a tracker works: maps, history, and you can even add it to a
 **person**.
 
+Every box also gets its own entity, for example `sensor.box_zones_parking`.
+Its state is how many followed trackers are inside the box, and the
+`trackers` attribute names them.
+
 ## Use it in an automation
 
 Use a **State** trigger on the Box Zones entity:
@@ -62,12 +67,17 @@ triggers:
 To trigger when the car leaves, use `from: Parking` instead.
 
 > Home Assistant's **Zone** trigger only knows round zones, so your boxes don't
-> show up there. Use the State trigger above.
+> show up there. Use the State trigger above, or a State trigger on the box's
+> own entity (`sensor.box_zones_parking` going above 0).
 
 ## Good to know
 
-- **Overlapping boxes:** the smallest box wins. So a "Parking spot" box inside
-  a "Street" box shows "Parking spot" when the car is in the spot.
+- **Overlaps:** the smallest area wins, between boxes and also between a box
+  and a normal round zone (the same rule Home Assistant uses for zones). A
+  "Driveway" box inside your Home zone shows "Driveway"; a big
+  "Neighbourhood" box around your home shows "Home" when you're home.
+- **Zone conditions keep working:** "car is in Home" is still true while the
+  car is in a box inside your Home zone.
 - **Same name, more boxes:** several boxes can share one name, for example two
   spots that both count as `Parking`.
 - **More trackers:** one Box Zones follows as many trackers as you like. Add

@@ -94,6 +94,34 @@ export function resize(base, h, lat, lon) {
   return { ...base, lat: c.lat, lon: c.lon, width_m: w, height_m: ht };
 }
 
+export const toDeg = deg;
+
+/** Turn a rotation by `delta` degrees, to 0.1°. With `snap` (e.g. 15) it lands on multiples of it. */
+export function turnBy(rotation, delta, snap = 0) {
+  let r = rotation + delta;
+  if (snap > 0) r = Math.round(r / snap) * snap;
+  const n = Math.round(normDeg(r) * 10) / 10;
+  return n >= 360 ? 0 : n;
+}
+
+/** Distance from point p to the segment a-b ({x, y} objects, e.g. screen pixels). */
+export function distToSegment(p, a, b) {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const len2 = dx * dx + dy * dy;
+  const t = len2 ? Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / len2)) : 0;
+  return Math.hypot(p.x - (a.x + t * dx), p.y - (a.y + t * dy));
+}
+
+/** Is point p inside the polygon pts ({x, y} objects)? */
+export function pointInPolygon(p, pts) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const a = pts[i], b = pts[j];
+    if ((a.y > p.y) !== (b.y > p.y) && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+  }
+  return inside;
+}
+
 /** The rotation that points the box's top side at lat/lon, in whole degrees. */
 export function rotationTo(base, lat, lon) {
   const e = (lon - base.lon) * M_PER_DEG * Math.cos(rad(base.lat));
