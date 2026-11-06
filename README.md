@@ -83,6 +83,7 @@ To trigger when the car leaves, use `from: Parking` instead.
 
 ```bash
 pip install -r requirements_test.txt
+pip install "$(python scripts/frontend_requirement.py)"
 pytest
 node --test tests/js/*.test.mjs
 ```
