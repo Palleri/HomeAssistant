@@ -160,6 +160,8 @@ summary { cursor: pointer; color: var(--secondary-text-color); font-size: 14px; 
 .zb-h::after { content: ""; position: absolute; inset: 8px; background: #fff; border: 2px solid ${EDIT_COLOR}; border-radius: 3px;
   box-shadow: 0 1px 3px rgba(0,0,0,.4); }
 .zb-h-edge::after { inset: 9px; border-radius: 50%; }
+.zb-h-rotate { cursor: ${svgUrl(ICON_ROTATE, "#212121").replace(/"\)$/, '") 12 12')}, alias !important; }
+.zb-h-rotate::after { inset: 3px; border-radius: 50%; background: #fff ${svgUrl(ICON_ROTATE, EDIT_COLOR)} center / 18px no-repeat; }
 .zb-cur-move, .zb-cur-move .leaflet-interactive { cursor: move !important; }
 .zb-cur-turn, .zb-cur-turn .leaflet-interactive { cursor: ${svgUrl(ICON_ROTATE, "#212121").replace(/"\)$/, '") 12 12')}, alias !important; }
 .zb-msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px; text-align: center;
@@ -435,7 +437,7 @@ class BoxZonesPanel extends HTMLElement {
       h("ol", { class: "steps" },
         h("li", {}, "Drag inside the box to move it."),
         h("li", {}, "Drag the white squares and dots to change the size."),
-        h("li", {}, "Drag the box's edge to turn it. Grab far from the middle for fine turns; hold Shift for 15° steps.")),
+        h("li", {}, "Drag the round turn button, or the box's edge, to turn it. Grab far from the middle for fine turns; hold Shift for 15° steps.")),
       h("details", {}, h("summary", {}, "Exact size"),
         h("div", { class: "row3" }, num("width_m", "Width (m)", "1"), num("height_m", "Height (m)", "1"), num("rotation_deg", "Turn (°)", "0.1"))),
       h("div", { class: "actions" },
@@ -474,7 +476,7 @@ class BoxZonesPanel extends HTMLElement {
       : h("p", { class: "hint" }, "No trackers with a GPS position were found. Box Zones works with trackers that report a position, such as the Home Assistant app or a car integration.");
     return [h("section", {},
       h("div", { class: "head" }, h("h2", {}, "Followed trackers")),
-      h("p", { class: "hint" }, "Tick the trackers to follow. Each one gets its own location entity."),
+      h("p", { class: "hint" }, "Tick the trackers to follow. Each one gets its own location entity. Unticking one stops following it and removes its location entity."),
       list,
       h("div", { class: "actions" },
         h("button", { class: "primary", onclick: () => this._saveDevices(), disabled: this._busy }, this._busy ? "Saving…" : "Save"),
@@ -567,6 +569,11 @@ class BoxZonesPanel extends HTMLElement {
   async _saveDevices() {
     const m = this._mode;
     if (this._busy) return;
+    const dropped = this._trackers.filter((t) => !m.selected.has(t.source));
+    if (dropped.length) {
+      const names = dropped.map((t) => this._trackerInfo(t).name).join(", ");
+      if (!window.confirm(`Stop following ${names}? Its Box Zones location entity will be removed.`)) return;
+    }
     this._busy = true;
     this._render();
     try {
@@ -650,12 +657,20 @@ class BoxZonesPanel extends HTMLElement {
     const editing = this._mode.view === "edit" ? this._mode.draft : null;
     if (this._handles && (!editing || this._handles.id !== editing.id)) {
       for (const mk of Object.values(this._handles.markers)) mk.remove();
+      this._handles.line.remove();
       this._handles = null;
     }
     if (editing && !this._handles) {
       const markers = {};
       for (const key of Object.keys(G.HANDLES)) markers[key] = this._makeHandle(key).addTo(this._map);
-      this._handles = { id: editing.id, markers };
+      // The turn button is not a Leaflet drag: the pointer handlers below turn the box
+      // by how far you go around the middle, the same way as dragging the edge.
+      markers.rotate = L.marker([0, 0], {
+        icon: L.divIcon({ className: "zb-h zb-h-rotate", iconSize: [30, 30] }),
+        keyboard: false, zIndexOffset: 1000, title: "Turn",
+      }).addTo(this._map);
+      const line = L.polyline([], { color: EDIT_COLOR, weight: 2, dashArray: "4 4", interactive: false }).addTo(this._map);
+      this._handles = { id: editing.id, markers, line };
     }
     this._placeHandles();
   }
@@ -704,6 +719,13 @@ class BoxZonesPanel extends HTMLElement {
       const p = G.localToGeo(d, (sx * d.width_m) / 2, (sy * d.height_m) / 2);
       this._handles.markers[key].setLatLng([p.lat, p.lon]);
     }
+    const top = G.localToGeo(d, 0, d.height_m / 2);
+    const c = this._map.latLngToContainerPoint([d.lat, d.lon]);
+    const tp = this._map.latLngToContainerPoint([top.lat, top.lon]);
+    const rp = G.rotateHandlePx(c, tp, d.rotation_deg);
+    const rl = this._map.containerPointToLatLng([rp.x, rp.y]);
+    this._handles.markers.rotate.setLatLng(rl);
+    this._handles.line.setLatLngs([[top.lat, top.lon], rl]);
   }
 
   // ---------------------------------------------- move and turn by dragging the box
@@ -712,6 +734,7 @@ class BoxZonesPanel extends HTMLElement {
     if (this._mode.view !== "edit" || !this._map) return null;
     for (const n of e.composedPath()) {
       if (n === this._mapEl) break;
+      if (n.classList && n.classList.contains("zb-h-rotate")) return "turn";
       // Resize handles and map controls handle their own events.
       if (n.classList && (n.classList.contains("zb-h") || n.classList.contains("leaflet-control"))) return null;
     }
