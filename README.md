@@ -1,3 +1,5 @@
+<img src="images/icon.png" alt="" width="96" align="right">
+
 # Box Zones
 
 **Rectangular zones for Home Assistant.** Draw boxes on a map, turn them to any
