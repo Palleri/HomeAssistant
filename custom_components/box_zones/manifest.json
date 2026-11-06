@@ -1,0 +1,14 @@
+{
+  "domain": "box_zones",
+  "name": "Box Zones",
+  "codeowners": ["@Palleri"],
+  "config_flow": true,
+  "dependencies": ["http", "panel_custom", "zone"],
+  "documentation": "https://github.com/Palleri/HomeAssistant",
+  "integration_type": "service",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/Palleri/HomeAssistant/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "0.1.0"
+}
