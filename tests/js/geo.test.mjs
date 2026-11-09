@@ -199,3 +199,73 @@ test("a duplicate gets the next free name", () => {
   assert.equal(G.nextName("Parking", ["Parking", "Parking 2"]), "Parking 3");
   assert.equal(G.nextName("Spot 2", ["Spot 2", "Spot 3"]), "Spot 4");
 });
+
+// ------------------------------------------------------- editing a polygon
+const SQUARE = [at(0, 0), at(10, 0), at(10, 10), at(0, 10)];
+const copy = (pts) => pts.map((p) => [...p]);
+const poly = (points) => ({ shape: "polygon", points });
+
+test("insertCorner adds a corner on the chosen side and leaves the input alone", () => {
+  const before = copy(SQUARE);
+  const mid = G.sideMidpoints(SQUARE)[1]; // the east side, corners 1 -> 2
+  const p = G.insertCorner(SQUARE, 1, mid);
+  assert.equal(p.length, 5);
+  assert.deepEqual(p[2], mid);
+  assert.deepEqual(p.filter((_, i) => i !== 2), SQUARE);
+  assert.deepEqual(SQUARE, before);
+  // Pulling the new corner outwards keeps a valid outline with more area.
+  const out = G.moveCorner(p, 2, at(20, 5));
+  assert.ok(!G.selfIntersects(out));
+  assert.ok(G.areaM2(poly(out)) > G.areaM2(poly(SQUARE)));
+  // The last side runs back to the first corner.
+  assert.deepEqual(G.insertCorner(SQUARE, 3, at(-1, 5)).at(-1), at(-1, 5));
+  assert.equal(G.insertCorner(SQUARE, 4, at(-1, 5)), null);
+});
+
+test("insertCorner stops at the maximum number of corners", () => {
+  const many = Array.from({ length: G.MAX_CORNERS }, (_, i) => {
+    const a = (2 * Math.PI * i) / G.MAX_CORNERS;
+    return at(100 * Math.cos(a), 100 * Math.sin(a));
+  });
+  assert.equal(G.insertCorner(many, 0, at(0, 0)), null);
+  assert.equal(G.insertCorner(many.slice(1), 0, at(0, 0)).length, G.MAX_CORNERS);
+});
+
+test("removeCorner removes one corner but never goes below 3", () => {
+  const five = G.insertCorner(SQUARE, 0, at(5, -3));
+  const four = G.removeCorner(five, 1);
+  assert.deepEqual(four, SQUARE);
+  const three = G.removeCorner(four, 0);
+  assert.deepEqual(three, SQUARE.slice(1));
+  assert.equal(G.removeCorner(three, 0), null);
+  assert.equal(G.removeCorner(four, 7), null);
+  assert.equal(five.length, 5); // the input is unchanged
+});
+
+test("side midpoints sit halfway along each side", () => {
+  const mids = G.sideMidpoints(SQUARE);
+  const want = [at(5, 0), at(10, 5), at(5, 10), at(0, 5)];
+  assert.equal(mids.length, 4);
+  mids.forEach((m, i) => { close(m[0], want[i][0], 1e-9); close(m[1], want[i][1], 1e-9); });
+});
+
+test("dragging a corner across the outline makes it cross itself", () => {
+  assert.ok(!G.selfIntersects(SQUARE));
+  assert.ok(G.selfIntersects(G.moveCorner(SQUARE, 2, at(5, -5)))); // pulled across the far side
+  assert.ok(G.selfIntersects(G.moveCorner(SQUARE, 2, SQUARE[0]))); // onto another corner
+  assert.ok(!G.selfIntersects(G.moveCorner(SQUARE, 2, at(4, 4)))); // a dent (concave) is fine
+});
+
+test("shiftPoints moves the whole polygon without changing its area", () => {
+  const moved = G.shiftPoints(ELL.points, 0.0001, -0.0002);
+  close(G.areaM2(poly(moved)), G.areaM2(ELL), 0.01);
+  close(moved[3][0] - ELL.points[3][0], 0.0001, 1e-12);
+  close(moved[3][1] - ELL.points[3][1], -0.0002, 1e-12);
+});
+
+test("onOrInside counts the inside and a band along the sides", () => {
+  const sq = [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }, { x: 0, y: 100 }];
+  assert.ok(G.onOrInside({ x: 50, y: 50 }, sq, 10));
+  assert.ok(G.onOrInside({ x: 105, y: 50 }, sq, 10));
+  assert.ok(!G.onOrInside({ x: 115, y: 50 }, sq, 10));
+});

@@ -56,6 +56,8 @@ const MAX_ZOOM = 23;
 const EDGE_PX = { mouse: 10, touch: 20 };
 const EDIT_COLOR = "#ff9800";
 const DEVICE_COLOR = "#2e7d32";
+// A polygon being edited whose outline crosses itself.
+const ERROR_COLOR = "#db4437";
 
 const STATE_LABELS = { home: "Home", not_home: "Away", unavailable: "Unavailable", unknown: "Unknown" };
 const stateLabel = (s) => (s == null ? "Not created yet" : STATE_LABELS[s] || s);
@@ -160,6 +162,9 @@ summary { cursor: pointer; color: var(--secondary-text-color); font-size: 14px; 
 .zb-h::after { content: ""; position: absolute; inset: 8px; background: #fff; border: 2px solid ${EDIT_COLOR}; border-radius: 3px;
   box-shadow: 0 1px 3px rgba(0,0,0,.4); }
 .zb-h-edge::after { inset: 9px; border-radius: 50%; }
+/* Polygon corners: a selected corner is filled; side midpoints are small dots. */
+.zb-h-sel::after { background: ${EDIT_COLOR}; }
+.zb-h-mid::after { inset: 10px; border-radius: 50%; opacity: .85; }
 .zb-h-rotate { cursor: ${svgUrl(ICON_ROTATE, "#212121").replace(/"\)$/, '") 12 12')}, alias !important; }
 .zb-h-rotate::after { inset: 3px; border-radius: 50%; background: #fff ${svgUrl(ICON_ROTATE, EDIT_COLOR)} center / 18px no-repeat; }
 .zb-cur-move, .zb-cur-move .leaflet-interactive { cursor: move !important; }
@@ -431,19 +436,9 @@ class BoxZonesPanel extends HTMLElement {
       return h("label", { class: "field" }, label, input);
     };
     this._fields = {};
-    if (G.shapeOf(d) === G.POLYGON) {
-      // Polygons can be renamed and deleted here; changing the outline comes later.
-      return [h("section", {},
-        h("div", { class: "head" }, h("h2", {}, m.isNew ? "New polygon" : "Edit polygon")),
-        h("label", { class: "field" }, "Name (this is what the location entity will show)", name),
-        h("div", { class: "actions" },
-          h("button", { class: "primary", onclick: () => this._save(), disabled: this._busy }, "Save"),
-          h("button", { onclick: () => this._cancel(), disabled: this._busy }, "Cancel"),
-          h("span", { class: "spacer" }),
-          m.isNew ? null : h("button", { class: "danger", onclick: () => this._delete(), disabled: this._busy }, "Delete")))];
-    }
+    if (G.shapeOf(d) === G.POLYGON) return this._renderPolygonEdit(name);
     const view = h("section", {},
-      h("div", { class: "head" }, h("h2", {}, m.isNew ? "New box" : "Edit box")),
+      h("div", { class: "head" }, h("h2", {}, m.isNew ? "New box" : "Edit rectangle")),
       h("label", { class: "field" }, "Name (this is what the location entity will show)", name),
       h("ol", { class: "steps" },
         h("li", {}, "Drag inside the box to move it."),
@@ -464,6 +459,7 @@ class BoxZonesPanel extends HTMLElement {
   _updateFields() {
     const d = this._mode.draft;
     if (!d) return;
+    this._updatePolygonInfo();
     for (const [key, input] of Object.entries(this._fields)) {
       if (this.shadowRoot.activeElement !== input) input.value = String(Math.round(d[key] * 10) / 10);
     }
@@ -557,6 +553,7 @@ class BoxZonesPanel extends HTMLElement {
     const d = this._mode.draft;
     if (!d || this._busy) return;
     if (!d.name.trim()) { this._setError("Give the box a name first."); return; }
+    if (G.shapeOf(d) === G.POLYGON && G.selfIntersects(d.points)) { this._setError(G.CROSSING_ERROR); return; }
     this._busy = true;
     try {
       const res = await this._hass.callWS({ type: "box_zones/save_zone", zone: { ...d, name: d.name.trim() } });
@@ -650,13 +647,17 @@ class BoxZonesPanel extends HTMLElement {
     }
     for (const z of zones) {
       const isEdit = z.id === editing;
-      const color = isEdit ? EDIT_COLOR : primary;
+      // A polygon being edited whose outline crosses itself is drawn red and dashed.
+      const crossing = isEdit && G.shapeOf(z) === G.POLYGON && G.selfIntersects(z.points);
+      const color = crossing ? ERROR_COLOR : isEdit ? EDIT_COLOR : primary;
       const style = {
         color, fillColor: color, weight: isEdit ? 3 : 2,
         fillOpacity: isEdit ? 0.25 : editing ? 0.08 : 0.18, opacity: editing && !isEdit ? 0.5 : 1,
+        dashArray: crossing ? "8 6" : null,
       };
       const pts = G.outline(z).map((p) => [p.lat, p.lon]);
-      const lp = G.labelPoint(z), labelAt = [lp.lat, lp.lon];
+      // A crossing outline has no proper inside to put the label in (it is hidden while editing anyway).
+      const lp = crossing ? { lat: z.points[0][0], lon: z.points[0][1] } : G.labelPoint(z), labelAt = [lp.lat, lp.lon];
       let l = this._zoneLayers.get(z.id);
       if (!l) {
         const poly = L.polygon(pts, style).addTo(this._map);
@@ -704,6 +705,7 @@ class BoxZonesPanel extends HTMLElement {
       this._handles = { id: editing.id, markers, line };
     }
     this._placeHandles();
+    this._syncPolygonHandles();
   }
 
   _makeHandle(key) {
@@ -743,6 +745,7 @@ class BoxZonesPanel extends HTMLElement {
   }
 
   _placeHandles(skip) {
+    if (this._mode.view === "edit" && G.shapeOf(this._mode.draft) === G.POLYGON) { this._placePolygonHandles(); return; }
     if (!this._handles || this._mode.view !== "edit") return;
     const d = this._mode.draft;
     if (G.shapeOf(d) !== G.RECTANGLE) return;
@@ -766,8 +769,6 @@ class BoxZonesPanel extends HTMLElement {
   /** "move" (inside the box), "turn" (on its edge) or null (let the map pan). */
   _gestureAt(e) {
     if (this._mode.view !== "edit" || !this._map) return null;
-    // A polygon can't be moved or turned on the map yet: let the map pan.
-    if (G.shapeOf(this._mode.draft) !== G.RECTANGLE) return null;
     for (const n of e.composedPath()) {
       if (n === this._mapEl) break;
       if (n.classList && n.classList.contains("zb-h-rotate")) return "turn";
@@ -775,6 +776,7 @@ class BoxZonesPanel extends HTMLElement {
       if (n.classList && (n.classList.contains("zb-h") || n.classList.contains("leaflet-control"))) return null;
     }
     const d = this._mode.draft;
+    if (G.shapeOf(d) === G.POLYGON) return this._polygonGestureAt(e);
     const pt = this._map.mouseEventToContainerPoint(e);
     const cs = G.corners(d).map((p) => this._map.latLngToContainerPoint([p.lat, p.lon]));
     let edge = Infinity;
@@ -797,7 +799,8 @@ class BoxZonesPanel extends HTMLElement {
     e.stopImmediatePropagation();
     const d = this._mode.draft;
     const pt = this._map.mouseEventToContainerPoint(e);
-    const c = this._map.latLngToContainerPoint([d.lat, d.lon]);
+    // The middle that turning goes around; polygons only move, never turn.
+    const c = G.shapeOf(d) === G.RECTANGLE ? this._map.latLngToContainerPoint([d.lat, d.lon]) : pt;
     const fromButton = e.composedPath().some((n) => n.classList && n.classList.contains("zb-h-rotate"));
     this._gesture = {
       kind, fromButton, pointerId: e.pointerId, base: { ...d },
@@ -825,8 +828,11 @@ class BoxZonesPanel extends HTMLElement {
     g.pointLL = this._map.containerPointToLatLng(pt);
     if (g.kind === "move") {
       const ll = this._map.containerPointToLatLng(pt);
-      d.lat = g.base.lat + ll.lat - g.startLL.lat;
-      d.lon = g.base.lon + ll.lng - g.startLL.lng;
+      if (G.shapeOf(d) === G.POLYGON) d.points = G.shiftPoints(g.base.points, ll.lat - g.startLL.lat, ll.lng - g.startLL.lng);
+      else {
+        d.lat = g.base.lat + ll.lat - g.startLL.lat;
+        d.lon = g.base.lon + ll.lng - g.startLL.lng;
+      }
     } else {
       // Turn by how far the pointer went around the middle, not by where it points:
       // no jump when you grab the edge, and finer control further from the middle.
@@ -846,6 +852,171 @@ class BoxZonesPanel extends HTMLElement {
     if (this._mapEl.hasPointerCapture(e.pointerId)) this._mapEl.releasePointerCapture(e.pointerId);
     this._placeHandles(); // the turn button goes back next to the box
     this._updateFields();
+  }
+
+  // ---------------------------------------------------------- editing a polygon
+  // A square handle on every corner moves it; a dot in the middle of each side
+  // becomes a new corner when dragged. Tapping a corner selects it (for Remove
+  // corner); right-clicking removes it. Dragging inside or on a side moves the
+  // whole polygon (_gestureAt -> _polygonGestureAt). The draft's points array is
+  // shared with the stored box, so it is always replaced, never changed in place.
+
+  _renderPolygonEdit(name) {
+    const m = this._mode;
+    const d = m.draft;
+    const atMin = d.points.length <= G.MIN_CORNERS;
+    this._polyInfo = h("span", {});
+    this._polyWarn = h("div", { class: "error", hidden: true }, G.CROSSING_ERROR);
+    const view = h("section", {},
+      h("div", { class: "head" }, h("h2", {}, m.isNew ? "New polygon" : "Edit polygon")),
+      h("label", { class: "field" }, "Name (this is what the location entity will show)", name),
+      h("ol", { class: "steps" },
+        h("li", {}, "Drag inside the polygon, or on a side, to move it."),
+        h("li", {}, "Drag a white square to move that corner."),
+        h("li", {}, `Drag a dot in the middle of a side to add a corner there (up to ${G.MAX_CORNERS}).`),
+        h("li", {}, `To remove a corner, tap it and press Remove corner, or right-click it. A polygon keeps at least ${G.MIN_CORNERS} corners.`)),
+      m.corner == null ? null : h("div", { class: "actions", style: "margin: 0 0 14px" },
+        h("button", { onclick: () => this._removeCorner(m.corner), disabled: atMin || this._busy }, "Remove corner"),
+        atMin ? h("span", { class: "hint" }, `A polygon needs at least ${G.MIN_CORNERS} corners.`) : null),
+      this._polyWarn,
+      h("details", {}, h("summary", {}, "Exact size"), h("p", { class: "hint" }, this._polyInfo)),
+      h("div", { class: "actions" },
+        h("button", { class: "primary", onclick: () => this._save(), disabled: this._busy }, "Save"),
+        h("button", { onclick: () => this._cancel(), disabled: this._busy }, "Cancel"),
+        h("span", { class: "spacer" }),
+        m.isNew ? null : h("button", { class: "danger", onclick: () => this._delete(), disabled: this._busy }, "Delete")));
+    this._updatePolygonInfo();
+    return [view];
+  }
+
+  /** "Exact size" (area and corners) and the crossing warning, kept up to date while dragging. */
+  _updatePolygonInfo() {
+    const d = this._mode.draft;
+    if (!this._polyInfo || !d || G.shapeOf(d) !== G.POLYGON) return;
+    this._polyInfo.textContent = G.formatSize(d);
+    this._polyWarn.hidden = !G.selfIntersects(d.points);
+  }
+
+  _syncPolygonHandles() {
+    const m = this._mode;
+    const d = m.view === "edit" && G.shapeOf(m.draft) === G.POLYGON ? m.draft : null;
+    const ph = this._polyHandles;
+    // Rebuilt whenever the corners or the selection change, so each handle keeps its index.
+    if (ph && (!d || ph.id !== d.id || ph.corners.length !== d.points.length || ph.sel !== m.corner)) {
+      for (const mk of [...ph.corners, ...ph.mids]) mk.remove();
+      this._polyHandles = null;
+    }
+    if (d && !this._polyHandles) {
+      const corners = d.points.map((_, i) => this._makeCornerHandle(i, i === m.corner).addTo(this._map));
+      const mids = d.points.length < G.MAX_CORNERS ? d.points.map((_, i) => this._makeSideHandle(i).addTo(this._map)) : [];
+      this._polyHandles = { id: d.id, corners, mids, sel: m.corner };
+    }
+    this._placePolygonHandles();
+  }
+
+  _placePolygonHandles() {
+    const ph = this._polyHandles;
+    const d = this._mode.draft;
+    // While a new corner is pulled out of a side the handles are one short; they are rebuilt when it is let go.
+    if (!ph || !d || ph.id !== d.id || ph.corners.length !== d.points.length) return;
+    const dragged = this._drag ? this._drag.corner : null;
+    d.points.forEach((p, i) => { if (i !== dragged) ph.corners[i].setLatLng(p); });
+    G.sideMidpoints(d.points).forEach((p, i) => { if (ph.mids[i]) ph.mids[i].setLatLng(p); });
+  }
+
+  _polygonMarker(cls, title, zIndexOffset) {
+    const L = this._L;
+    return L.marker([0, 0], {
+      icon: L.divIcon({ className: `zb-h ${cls}`, iconSize: [30, 30] }),
+      draggable: true, autoPan: false, keyboard: false, zIndexOffset, title,
+    });
+  }
+
+  _makeCornerHandle(i, selected) {
+    const L = this._L;
+    const mk = this._polygonMarker(`zb-h-corner${selected ? " zb-h-sel" : ""}`, "Corner: drag to move, tap to select, right-click to remove", 1000);
+    mk.on("dragstart", () => { this._drag = { corner: i }; this._map.dragging.disable(); });
+    mk.on("drag", (e) => this._dragCorner(i, e.latlng));
+    mk.on("dragend", () => this._endPolygonDrag());
+    // Leaflet sends no click after a drag, so this is a tap.
+    mk.on("click", (e) => { L.DomEvent.stopPropagation(e); this._selectCorner(i); });
+    mk.on("contextmenu", (e) => {
+      L.DomEvent.preventDefault(e.originalEvent);
+      L.DomEvent.stopPropagation(e);
+      this._removeCorner(i);
+    });
+    return mk;
+  }
+
+  _makeSideHandle(i) {
+    const mk = this._polygonMarker("zb-h-mid", "Drag to add a corner", 900);
+    mk.on("dragstart", () => {
+      const d = this._mode.draft;
+      const ll = mk.getLatLng();
+      const points = d && G.insertCorner(d.points, i, [ll.lat, ll.lng]);
+      if (!points) return;
+      d.points = points;
+      this._drag = { corner: i + 1 };
+      this._map.dragging.disable();
+      this._syncZones();
+      this._updatePolygonInfo();
+    });
+    mk.on("drag", (e) => this._dragCorner(i + 1, e.latlng));
+    mk.on("dragend", () => this._endPolygonDrag());
+    return mk;
+  }
+
+  _dragCorner(index, ll) {
+    const d = this._mode.draft;
+    if (!d || !this._drag || this._drag.corner !== index) return;
+    d.points = G.moveCorner(d.points, index, [ll.lat, ll.lng]);
+    this._syncZones();
+    this._placePolygonHandles();
+    this._updatePolygonInfo();
+  }
+
+  _endPolygonDrag() {
+    if (!this._drag) return;
+    this._drag = null;
+    this._map.dragging.enable();
+    const m = this._mode;
+    const ph = this._polyHandles;
+    if (m.view === "edit" && ph && ph.corners.length !== m.draft.points.length && m.corner != null) {
+      // A corner was added, so the selected index points elsewhere now.
+      m.corner = null;
+      this._render();
+    }
+    this._syncPolygonHandles();
+  }
+
+  _selectCorner(i) {
+    const m = this._mode;
+    if (m.view !== "edit") return;
+    m.corner = m.corner === i ? null : i;
+    this._render();
+    this._syncPolygonHandles();
+  }
+
+  _removeCorner(i) {
+    const m = this._mode;
+    if (m.view !== "edit" || this._busy) return;
+    const points = G.removeCorner(m.draft.points, i);
+    if (!points) { this._setError(`A polygon needs at least ${G.MIN_CORNERS} corners.`); return; }
+    m.draft.points = points;
+    m.corner = null;
+    this._error = "";
+    this._render();
+    this._syncZones();
+    this._syncPolygonHandles();
+  }
+
+  /** "move" when the pointer is inside the polygon or on a side, else null (the map pans). */
+  _polygonGestureAt(e) {
+    const d = this._mode.draft;
+    const pt = this._map.mouseEventToContainerPoint(e);
+    const cs = d.points.map((p) => this._map.latLngToContainerPoint(p));
+    const tol = e.pointerType === "touch" ? EDGE_PX.touch : EDGE_PX.mouse;
+    return G.onOrInside(pt, cs, tol) ? "move" : null;
   }
 
   _syncDevices() {

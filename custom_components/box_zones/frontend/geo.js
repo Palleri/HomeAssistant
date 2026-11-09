@@ -364,3 +364,47 @@ export function formatSize(z) {
 export function newId() {
   return `box_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
+
+// ------------------------------------------------------- editing a polygon
+// Pure helpers for the polygon editor. Corners are [lat, lon] pairs; every helper
+// returns a new array and never changes the one it was given (the editor's draft
+// can share its array with the stored box).
+
+/** The middle of each side, as [lat, lon]; side i runs from corner i to corner i + 1. */
+export function sideMidpoints(points) {
+  return points.map(([lat, lon], i) => {
+    const [lat2, lon2] = points[(i + 1) % points.length];
+    // The local plane is linear in lat/lon, so this is also the middle in metres.
+    return [(lat + lat2) / 2, (lon + lon2) / 2];
+  });
+}
+
+/** A new corner [lat, lon] on side `sideIndex` (between corners i and i + 1), or null at MAX_CORNERS. */
+export function insertCorner(points, sideIndex, latlon) {
+  if (points.length >= MAX_CORNERS || sideIndex < 0 || sideIndex >= points.length) return null;
+  const next = points.slice();
+  next.splice(sideIndex + 1, 0, [latlon[0], latlon[1]]);
+  return next;
+}
+
+/** The outline without corner `index`, or null when that would leave fewer than MIN_CORNERS. */
+export function removeCorner(points, index) {
+  if (points.length <= MIN_CORNERS || index < 0 || index >= points.length) return null;
+  return points.filter((_, i) => i !== index);
+}
+
+/** The outline with corner `index` at [lat, lon]. */
+export function moveCorner(points, index, latlon) {
+  return points.map((p, i) => (i === index ? [latlon[0], latlon[1]] : p));
+}
+
+/** Every corner shifted by dLat/dLon degrees (moving the whole polygon). */
+export function shiftPoints(points, dLat, dLon) {
+  return points.map(([lat, lon]) => [lat + dLat, lon + dLon]);
+}
+
+/** Is point p inside the outline pts ({x, y}, e.g. screen pixels) or within `tol` of a side? */
+export function onOrInside(p, pts, tol) {
+  for (let i = 0; i < pts.length; i++) if (distToSegment(p, pts[i], pts[(i + 1) % pts.length]) <= tol) return true;
+  return pointInPolygon(p, pts);
+}
