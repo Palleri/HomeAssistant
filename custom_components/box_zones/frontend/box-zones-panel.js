@@ -204,6 +204,10 @@ class BoxZonesPanel extends HTMLElement {
     this._drawLayers = null; // the outline and corner dots while drawing a new polygon
     this._tap = null; // the pointer that may become a tap while drawing
     this._pointers = new Set(); // pointers down on the map (two or more: a pinch, not a tap)
+    this._lastPointerType = "mouse"; // of the last pointer pressed on the map
+    // Watched on the window: a finger lifted over the side panel, or over a tile Leaflet
+    // has just removed, never sends its pointerup to the map.
+    this._onPointerEnd = (e) => this._pointers.delete(e.pointerId);
     this._onKey = (e) => {
       // Escape throws away a polygon being drawn, wherever the focus is.
       if (e.key === "Escape" && this._mode.view === "edit" && this._mode.drawing && !this._busy) this._cancel();
@@ -231,10 +235,14 @@ class BoxZonesPanel extends HTMLElement {
   connectedCallback() {
     if (this._map) setTimeout(() => this._map.invalidateSize(), 0);
     window.addEventListener("keydown", this._onKey);
+    window.addEventListener("pointerup", this._onPointerEnd, true);
+    window.addEventListener("pointercancel", this._onPointerEnd, true);
   }
 
   disconnectedCallback() {
     window.removeEventListener("keydown", this._onKey);
+    window.removeEventListener("pointerup", this._onPointerEnd, true);
+    window.removeEventListener("pointercancel", this._onPointerEnd, true);
   }
 
   // ---------------------------------------------------------------- setup
@@ -828,8 +836,13 @@ class BoxZonesPanel extends HTMLElement {
 
   /** Pointer events on the map while drawing: a tap places a corner (or closes the outline); a pan or pinch does nothing. */
   _onDrawPointer(e) {
-    if (e.type === "pointerdown") this._pointers.add(e.pointerId);
-    else this._pointers.delete(e.pointerId);
+    if (e.type === "pointerdown") {
+      // The first finger down (or any mouse press) means no other pointer is down,
+      // whatever went missing before.
+      if (e.isPrimary) this._pointers.clear();
+      this._pointers.add(e.pointerId);
+      this._lastPointerType = e.pointerType;
+    } else this._pointers.delete(e.pointerId);
     const dr = this._mode.view === "edit" ? this._mode.drawing : null;
     if (!dr || dr.closed || !this._map) { this._tap = null; return; }
     const touch = e.pointerType !== "mouse";
@@ -1117,7 +1130,8 @@ class BoxZonesPanel extends HTMLElement {
     mk.on("contextmenu", (e) => {
       L.DomEvent.preventDefault(e.originalEvent);
       L.DomEvent.stopPropagation(e);
-      this._removeCorner(i);
+      // Only a right-click removes the corner: a long press on a touch screen sends contextmenu too.
+      if ((e.originalEvent.pointerType || this._lastPointerType) === "mouse") this._removeCorner(i);
     });
     return mk;
   }
