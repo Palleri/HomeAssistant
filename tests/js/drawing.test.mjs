@@ -80,3 +80,12 @@ test("taps on a closed outline change nothing", () => {
   const closed = G.closeDrawing(drawn(A, B, C));
   assert.equal(G.tapDrawing(closed, D, { x: 50, y: 50 }, [{ x: 0, y: 0 }, { x: 100, y: 0 }, { x: 100, y: 100 }], 10), closed);
 });
+
+test("save stays disabled for a closed outline the server would refuse", () => {
+  // A bow tie crosses itself.
+  assert.equal(G.canSaveDrawing(G.closeDrawing(drawn(A, C, B, D))), false);
+  // About 1.1 m × 1.1 m: under the 4 m² minimum.
+  const tiny = G.closeDrawing(drawn(A, [A[0], A[1] + 0.000016], [A[0] + 0.00001, A[1] + 0.000016]));
+  assert.equal(G.canSaveDrawing(tiny), false);
+  assert.equal(G.canSaveDrawing(G.closeDrawing(drawn(A, B, C, D))), true);
+});

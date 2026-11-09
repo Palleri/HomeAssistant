@@ -269,3 +269,62 @@ test("onOrInside counts the inside and a band along the sides", () => {
   assert.ok(G.onOrInside({ x: 105, y: 50 }, sq, 10));
   assert.ok(!G.onOrInside({ x: 115, y: 50 }, sq, 10));
 });
+
+test("outlineProblem refuses exactly what the server refuses, with its message", () => {
+  const lon = (p, d) => [p[0], p[1] + d];
+  const big = (km) => { const half = (km * 1000) / 2; return [at(-half, 0), at(half, 0), at(0, 30)]; };
+  // A corner 4 mm north of a side: fine as drawn, but on the side once rounded to 7 decimals like the server.
+  const nearSide = [at(0, 0), at(20, 0), at(20, 20), [at(10, 0)[0] + 4e-8, at(10, 0)[1]], at(0, 20)];
+  assert.ok(!G.selfIntersects(nearSide));
+  const outlines = {
+    ell: ELL.points,
+    you: YOU.points,
+    bowTie: [at(0, 0), at(10, 10), at(10, 0), at(0, 10)],
+    nearSide,
+    tiny: [at(0, 0), at(1.5, 0), at(1.5, 1.5), at(0, 1.5)], // 2.25 m²
+    justEnough: [at(0, 0), at(2.1, 0), at(2.1, 2.1), at(0, 2.1)],
+    tooWide: big(50.5),
+    wideEnough: big(49.5),
+    tooTall: [at(0, 0), at(30, 0), at(15, 50500)],
+    twoCorners: [at(0, 0), at(10, 0)],
+    offTheEdge: [[10, 179.9999], [10, 180.0001], [10.0001, 180]],
+    pole: [[85.00001, 0], [84.9999, 0.001], [84.9999, -0.001]],
+  };
+  const py = process.env.PYTHON || "python3";
+  const out = execFileSync(py, ["-c", `
+import json, sys
+sys.path.insert(0, "custom_components/box_zones")
+from geometry import ZoneError, validate_zone
+result = {}
+for key, points in json.load(sys.stdin).items():
+    try:
+        validate_zone({"name": "x", "shape": "polygon", "points": points})
+        result[key] = None
+    except ZoneError as err:
+        result[key] = str(err)
+print(json.dumps(result))
+`], { input: JSON.stringify(outlines) });
+  const want = JSON.parse(out);
+  for (const [key, points] of Object.entries(outlines)) assert.equal(G.outlineProblem(points), want[key], key);
+  // Every kind of refusal is among the samples.
+  assert.equal(want.nearSide, G.CROSSING_ERROR);
+  assert.match(want.tiny, /at least 4 m²/);
+  assert.match(want.tooWide, /at most 50 km/);
+  assert.match(want.tooTall, /at most 50 km/);
+  assert.match(want.offTheEdge, /Longitude/);
+  assert.equal(want.ell, null);
+  assert.equal(want.wideEnough, null);
+  // An outline drawn on another copy of the world is saved on the main copy.
+  assert.equal(G.outlineProblem(ELL.points.map((p) => lon(p, 360))), null);
+});
+
+test("wrapOutline and unwrapLon keep an outline in one piece near the antimeridian", () => {
+  assert.equal(G.unwrapLon(-179.99, 179.99), 180.01);
+  assert.equal(G.unwrapLon(181, -179.5), -179);
+  assert.equal(G.unwrapLon(13.4, 13.3), 13.4);
+  assert.equal(G.wrapOutline(ELL.points), ELL.points); // already on the main copy
+  assert.deepEqual(G.wrapOutline([[1, 370], [1, 371], [2, 370]]), [[1, 10], [1, 11], [2, 10]]);
+  assert.deepEqual(G.wrapOutline([[1, -350], [1, -349], [2, -350]]), [[1, 10], [1, 11], [2, 10]]);
+  // Corners on both sides of the antimeridian: some stay outside -180..180, and that is refused.
+  assert.deepEqual(G.wrapOutline([[1, 179.9], [1, 180.1], [2, 180]]), [[1, 179.9], [1, 180.1], [2, 180]]);
+});

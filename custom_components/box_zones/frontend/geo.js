@@ -89,15 +89,6 @@ function plane(points) {
   return { refLat, refLon, mLon, xy: points.map(([lat, lon]) => ({ x: (lon - refLon) * mLon, y: (lat - refLat) * M_PER_DEG })) };
 }
 
-function ringContains(xy, px, py) {
-  let inside = false;
-  for (let i = 0, j = xy.length - 1; i < xy.length; j = i++) {
-    const a = xy[i], b = xy[j];
-    if ((a.y > py) !== (b.y > py) && px < ((b.x - a.x) * (py - a.y)) / (b.y - a.y) + a.x) inside = !inside;
-  }
-  return inside;
-}
-
 function signedArea(xy) {
   let s = 0;
   for (let i = 0; i < xy.length; i++) {
@@ -113,7 +104,7 @@ function polyContains(z, lat, lon) {
   for (let i = 0; i < xy.length; i++) {
     if (distToSegment(p, xy[i], xy[(i + 1) % xy.length]) <= EDGE_MARGIN_M) return true;
   }
-  return ringContains(xy, p.x, p.y);
+  return pointInPolygon(p, xy);
 }
 
 /** Centroid when inside, else the middle of the widest inside stretch east-west through it. */
@@ -127,7 +118,7 @@ function labelXY(xy) {
     cy += (p.y + q.y) * f;
   }
   cx /= 6 * a; cy /= 6 * a;
-  if (ringContains(xy, cx, cy)) return { x: cx, y: cy };
+  if (pointInPolygon({ x: cx, y: cy }, xy)) return { x: cx, y: cy };
   const xs = [];
   for (let i = 0; i < n; i++) {
     const p = xy[i], q = xy[(i + 1) % n];
@@ -171,7 +162,10 @@ function segmentsTouch(a, b, c, d) {
 
 /** Does the outline ([[lat, lon], ...]) cross or touch itself, or repeat a corner? */
 export function selfIntersects(points) {
-  const { xy } = plane(points);
+  return ringSelfIntersects(plane(points).xy);
+}
+
+function ringSelfIntersects(xy) {
   const n = xy.length;
   if (new Set(xy.map((p) => `${p.x},${p.y}`)).size !== n) return true;
   for (let i = 0; i < n; i++) {
@@ -184,6 +178,56 @@ export function selfIntersects(points) {
     }
   }
   return false;
+}
+
+// ------------------------------------------- checking an outline before saving
+// The same checks, in the same order and with the same messages, as
+// _validate_polygon in geometry.py, so Save is only offered for outlines the
+// server keeps.
+
+/** Corners are stored to 7 decimals (about 1 cm), like geometry.py's CORNER_DECIMALS. */
+export const CORNER_DECIMALS = 7;
+// toFixed rounds the exact value of the number, like Python's round().
+const roundCorner = (v) => Number(v.toFixed(CORNER_DECIMALS));
+
+/** `lon` moved by whole turns to within 180° of `refLon`: a tap on another copy of the world, brought next to the outline. */
+export function unwrapLon(lon, refLon) {
+  return lon - 360 * Math.round((lon - refLon) / 360);
+}
+
+/**
+ * The outline moved by whole turns of longitude so the middle of its longitudes
+ * is within -180..180 (the copy of the world the server stores). An outline that
+ * straddles the antimeridian keeps corners outside that range, which the server refuses.
+ */
+export function wrapOutline(points) {
+  if (!points.length) return points;
+  let w = Infinity, e = -Infinity;
+  for (const [, lon] of points) { w = Math.min(w, lon); e = Math.max(e, lon); }
+  const mid = (w + e) / 2;
+  const turns = mid > 180 ? Math.ceil((mid - 180) / 360) : mid < -180 ? -Math.ceil((-180 - mid) / 360) : 0;
+  return turns ? points.map(([lat, lon]) => [lat, lon - 360 * turns]) : points;
+}
+
+/** Why the server would refuse the outline as saved (after wrapOutline), or null when it is fine. */
+export function outlineProblem(points) {
+  const pts = wrapOutline(points);
+  if (pts.length < MIN_CORNERS || pts.length > MAX_CORNERS) return `A polygon must have ${MIN_CORNERS} to ${MAX_CORNERS} corners`;
+  const rounded = [];
+  for (const [lat, lon] of pts) {
+    if (!(lat >= -85 && lat <= 85)) return "Latitude must be between -85 and 85";
+    if (!(lon >= -180 && lon <= 180)) return "Longitude must be between -180 and 180";
+    rounded.push([roundCorner(lat), roundCorner(lon)]);
+  }
+  const { xy } = plane(rounded);
+  const xs = xy.map((p) => p.x), ys = xy.map((p) => p.y);
+  // "Across" like a rectangle: at most the largest width and height, east-west and north-south.
+  if (Math.max(...xs) - Math.min(...xs) > MAX_SIZE_M || Math.max(...ys) - Math.min(...ys) > MAX_SIZE_M) {
+    return `A polygon can be at most ${MAX_SIZE_M / 1000} km across`;
+  }
+  if (ringSelfIntersects(xy)) return CROSSING_ERROR;
+  if (Math.abs(signedArea(xy)) < MIN_AREA_M2) return `A polygon must be at least ${MIN_AREA_M2} m²`;
+  return null;
 }
 
 /** Per-shape maths. A new shape adds an entry with the same functions. */
@@ -438,9 +482,9 @@ export function closeDrawing(dr) {
   return canCloseDrawing(dr) ? { ...dr, closed: true } : dr;
 }
 
-/** Save is possible once the outline is closed with at least MIN_CORNERS corners. */
+/** Save is possible once the outline is closed and the server would keep it (see outlineProblem). */
 export function canSaveDrawing(dr) {
-  return dr.closed && dr.points.length >= MIN_CORNERS;
+  return dr.closed && dr.points.length >= MIN_CORNERS && !outlineProblem(dr.points);
 }
 
 /** Did the pointer stay within `tolPx` between down and up ({x, y} screen points), so it was a tap, not a pan? */
