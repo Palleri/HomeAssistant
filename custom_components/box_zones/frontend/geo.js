@@ -1,19 +1,28 @@
 /* Box Zones geometry. Pure functions, no DOM; the same maths as geometry.py.
  *
- * Every box has a `shape`; today only "rectangle" (a box without `shape` is a
- * rectangle). Callers use the shape-neutral functions (contains, areaM2,
- * labelPoint, outline, boundsPoints, bounds, findZone), which dispatch on the
- * shape, so a new shape only adds its own entry to SHAPES below.
+ * Every box has a `shape`: "rectangle" or "polygon" (a box without `shape` is
+ * a rectangle). Callers use the shape-neutral functions (contains, areaM2,
+ * labelPoint, outline, boundsPoints, bounds, findZone, formatSize), which
+ * dispatch on the shape, so a new shape only adds its own entry to SHAPES below.
  *
  * A rectangle: {lat, lon, width_m, height_m, rotation_deg}. Local frame: x along
  * the width, y along the height, metres from the centre. The turn (rotation_deg)
  * is clockwise on a north-up map; 0 means the width runs east-west.
+ *
+ * A polygon: {points: [[lat, lon], ...]}, its corners in order, the first not
+ * repeated. Local plane: x metres east, y metres north of the middle of the
+ * corners' lat/lon span.
  */
 export const M_PER_DEG = 111320;
 export const MIN_SIZE_M = 2;
 export const MAX_SIZE_M = 50000;
+export const MIN_AREA_M2 = MIN_SIZE_M * MIN_SIZE_M;
+export const MIN_CORNERS = 3;
+export const MAX_CORNERS = 100;
+export const CROSSING_ERROR = "The outline crosses itself";
 const EDGE_MARGIN_M = 1e-6;
 export const RECTANGLE = "rectangle";
+export const POLYGON = "polygon";
 
 const rad = (a) => (a * Math.PI) / 180;
 const deg = (a) => (a * 180) / Math.PI;
@@ -68,6 +77,115 @@ function rectOutline(z, perEdge) {
   return pts;
 }
 
+// ---------------------------------------------------------------- polygons
+// The same maths as the polygon functions in geometry.py, step for step.
+
+/** The polygon's local plane: {refLat, refLon, mLon, xy: [{x, y}]} for corners [[lat, lon], ...]. */
+function plane(points) {
+  let s = Infinity, n = -Infinity, w = Infinity, e = -Infinity;
+  for (const [lat, lon] of points) { s = Math.min(s, lat); n = Math.max(n, lat); w = Math.min(w, lon); e = Math.max(e, lon); }
+  const refLat = (s + n) / 2, refLon = (w + e) / 2;
+  const mLon = M_PER_DEG * Math.cos(rad(refLat));
+  return { refLat, refLon, mLon, xy: points.map(([lat, lon]) => ({ x: (lon - refLon) * mLon, y: (lat - refLat) * M_PER_DEG })) };
+}
+
+function ringContains(xy, px, py) {
+  let inside = false;
+  for (let i = 0, j = xy.length - 1; i < xy.length; j = i++) {
+    const a = xy[i], b = xy[j];
+    if ((a.y > py) !== (b.y > py) && px < ((b.x - a.x) * (py - a.y)) / (b.y - a.y) + a.x) inside = !inside;
+  }
+  return inside;
+}
+
+function signedArea(xy) {
+  let s = 0;
+  for (let i = 0; i < xy.length; i++) {
+    const a = xy[i], b = xy[(i + 1) % xy.length];
+    s += a.x * b.y - b.x * a.y;
+  }
+  return s / 2;
+}
+
+function polyContains(z, lat, lon) {
+  const { refLat, refLon, mLon, xy } = plane(z.points);
+  const p = { x: (lon - refLon) * mLon, y: (lat - refLat) * M_PER_DEG };
+  for (let i = 0; i < xy.length; i++) {
+    if (distToSegment(p, xy[i], xy[(i + 1) % xy.length]) <= EDGE_MARGIN_M) return true;
+  }
+  return ringContains(xy, p.x, p.y);
+}
+
+/** Centroid when inside, else the middle of the widest inside stretch east-west through it. */
+function labelXY(xy) {
+  const n = xy.length, a = signedArea(xy);
+  let cx = 0, cy = 0;
+  for (let i = 0; i < n; i++) {
+    const p = xy[i], q = xy[(i + 1) % n];
+    const f = p.x * q.y - q.x * p.y;
+    cx += (p.x + q.x) * f;
+    cy += (p.y + q.y) * f;
+  }
+  cx /= 6 * a; cy /= 6 * a;
+  if (ringContains(xy, cx, cy)) return { x: cx, y: cy };
+  const xs = [];
+  for (let i = 0; i < n; i++) {
+    const p = xy[i], q = xy[(i + 1) % n];
+    if ((p.y > cy) !== (q.y > cy)) xs.push(p.x + ((cy - p.y) * (q.x - p.x)) / (q.y - p.y));
+  }
+  xs.sort((u, v) => u - v);
+  let best = null;
+  for (let k = 0; k + 1 < xs.length; k += 2) if (!best || xs[k + 1] - xs[k] > best[1] - best[0]) best = [xs[k], xs[k + 1]];
+  return { x: (best[0] + best[1]) / 2, y: cy };
+}
+
+function polyLabelPoint(z) {
+  const { refLat, refLon, mLon, xy } = plane(z.points);
+  const p = labelXY(xy);
+  return { lat: refLat + p.y / M_PER_DEG, lon: refLon + p.x / mLon };
+}
+
+function polyOutline(z, perEdge) {
+  const { refLat, refLon, mLon, xy } = plane(z.points);
+  const pts = [];
+  for (let i = 0; i < xy.length; i++) {
+    const a = xy[i], b = xy[(i + 1) % xy.length];
+    for (let k = 0; k < perEdge; k++) {
+      const t = k / perEdge;
+      pts.push({ lat: refLat + (a.y + (b.y - a.y) * t) / M_PER_DEG, lon: refLon + (a.x + (b.x - a.x) * t) / mLon });
+    }
+  }
+  return pts;
+}
+
+const orient = (a, b, c) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+const onSegment = (a, b, p) =>
+  Math.min(a.x, b.x) <= p.x && p.x <= Math.max(a.x, b.x) && Math.min(a.y, b.y) <= p.y && p.y <= Math.max(a.y, b.y);
+
+function segmentsTouch(a, b, c, d) {
+  const o1 = orient(a, b, c), o2 = orient(a, b, d), o3 = orient(c, d, a), o4 = orient(c, d, b);
+  if (((o1 > 0 && o2 < 0) || (o1 < 0 && o2 > 0)) && ((o3 > 0 && o4 < 0) || (o3 < 0 && o4 > 0))) return true;
+  return (o1 === 0 && onSegment(a, b, c)) || (o2 === 0 && onSegment(a, b, d))
+    || (o3 === 0 && onSegment(c, d, a)) || (o4 === 0 && onSegment(c, d, b));
+}
+
+/** Does the outline ([[lat, lon], ...]) cross or touch itself, or repeat a corner? */
+export function selfIntersects(points) {
+  const { xy } = plane(points);
+  const n = xy.length;
+  if (new Set(xy.map((p) => `${p.x},${p.y}`)).size !== n) return true;
+  for (let i = 0; i < n; i++) {
+    const a = xy[i], b = xy[(i + 1) % n], c = xy[(i + 2) % n];
+    // Neighbouring sides meet only at their shared corner, never doubling back along one line.
+    if (orient(a, b, c) === 0 && (b.x - a.x) * (c.x - b.x) + (b.y - a.y) * (c.y - b.y) < 0) return true;
+    for (let j = i + 2; j < n; j++) {
+      if (i === 0 && j === n - 1) continue; // the last side is next to the first
+      if (segmentsTouch(a, b, xy[j], xy[(j + 1) % n])) return true;
+    }
+  }
+  return false;
+}
+
 /** Per-shape maths. A new shape adds an entry with the same functions. */
 const SHAPES = {
   [RECTANGLE]: {
@@ -76,6 +194,18 @@ const SHAPES = {
     labelPoint: (z) => ({ lat: z.lat, lon: z.lon }),
     outline: rectOutline,
     boundsPoints: corners,
+    sizeText: (z) => {
+      const f = (v) => (v >= 1000 ? `${round2(v / 1000)} km` : `${Math.round(v)} m`);
+      return `${f(z.width_m)} × ${f(z.height_m)}`;
+    },
+  },
+  [POLYGON]: {
+    contains: polyContains,
+    area: (z) => Math.abs(signedArea(plane(z.points).xy)),
+    labelPoint: polyLabelPoint,
+    outline: polyOutline,
+    boundsPoints: (z) => z.points.map(([lat, lon]) => ({ lat, lon })),
+    sizeText: (z) => `${formatArea(areaM2(z))} · ${z.points.length} corners`,
   },
 };
 
@@ -218,9 +348,17 @@ export function niceMetres(m) {
   return Math.round(m / 500) * 500;
 }
 
+/** Digits grouped in threes with spaces: 1240 -> "1 240". */
+const grouped = (n) => String(n).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
+
+/** "1 240 m²", or "3.5 km²" from a square kilometre up. */
+export function formatArea(m2) {
+  return m2 >= 1e6 ? `${round2(m2 / 1e6)} km²` : `${grouped(Math.round(m2))} m²`;
+}
+
+/** The list row's size: "100 m × 40 m" for a rectangle, "1 240 m² · 7 corners" for a polygon. */
 export function formatSize(z) {
-  const f = (v) => (v >= 1000 ? `${round2(v / 1000)} km` : `${Math.round(v)} m`);
-  return `${f(z.width_m)} × ${f(z.height_m)}`;
+  return shapeFns(z).sizeText(z);
 }
 
 export function newId() {

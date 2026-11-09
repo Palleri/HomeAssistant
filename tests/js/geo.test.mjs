@@ -6,6 +6,13 @@ import * as G from "../../custom_components/box_zones/frontend/geo.js";
 
 const BOX = { lat: 52.5163, lon: 13.3777, width_m: 100, height_m: 40, rotation_deg: 30 };
 const close = (a, b, eps = 1e-6) => assert.ok(Math.abs(a - b) < eps, `${a} != ${b}`);
+const NORTH = { ...BOX, rotation_deg: 0 };
+/** [lat, lon] x metres east and y metres north of BOX's centre. */
+const at = (x, y) => { const p = G.localToGeo(NORTH, x, y); return [p.lat, p.lon]; };
+const polygon = (...xy) => ({ id: "p", name: "Garden", shape: "polygon", points: xy.map(([x, y]) => at(x, y)) });
+// An L, 40 m × 40 m with the north-east quarter (the notch) cut out, and a U whose middle is in its notch.
+const ELL = polygon([-20, -20], [20, -20], [20, 0], [0, 0], [0, 20], [-20, 20]);
+const YOU = polygon([-30, -20], [30, -20], [30, 20], [10, 20], [10, -10], [-10, -10], [-10, 20], [-30, 20]);
 
 test("local and geo coordinates round-trip", () => {
   const p = G.localToGeo(BOX, 12, -7);
@@ -46,7 +53,14 @@ test("JS and Python agree on inside/outside, area and label point", () => {
     const p = G.localToGeo(BOX, (Math.random() - 0.5) * 140, (Math.random() - 0.5) * 70);
     pts.push([p.lat, p.lon]);
   }
-  const boxes = [BOX, { ...BOX, shape: "rectangle", width_m: 7.5, height_m: 1234.25 }];
+  // Points on the polygons' sides and corners too.
+  for (const poly of [ELL, YOU]) {
+    poly.points.forEach((a, i) => {
+      const b = poly.points[(i + 1) % poly.points.length];
+      pts.push(a, [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]);
+    });
+  }
+  const boxes = [BOX, { ...BOX, shape: "rectangle", width_m: 7.5, height_m: 1234.25 }, ELL, YOU];
   const py = process.env.PYTHON || "python3";
   const out = execFileSync(py, ["-c", `
 import json, sys
@@ -65,6 +79,59 @@ print(json.dumps([
     const lp = G.labelPoint(box);
     close(lp.lat, want[b].label[0], 1e-12); close(lp.lon, want[b].label[1], 1e-12);
   });
+  // The concave polygons really do have points inside and outside among the samples.
+  for (const b of [2, 3]) assert.ok(want[b].inside.includes(true) && want[b].inside.includes(false));
+});
+
+test("inside test for polygons: convex, concave, on a side, at a corner", () => {
+  const square = polygon([-20, -20], [20, -20], [20, 20], [-20, 20]);
+  assert.ok(G.contains(square, ...at(0, 0)));
+  assert.ok(!G.contains(square, ...at(20.5, 0)));
+  assert.ok(G.contains(ELL, ...at(-10, 10)) && G.contains(ELL, ...at(10, -10)));
+  assert.ok(!G.contains(ELL, ...at(10, 10))); // the notch
+  ELL.points.forEach((a, i) => {
+    const b = ELL.points[(i + 1) % ELL.points.length];
+    assert.ok(G.contains(ELL, ...a), `corner ${i}`);
+    assert.ok(G.contains(ELL, (a[0] + b[0]) / 2, (a[1] + b[1]) / 2), `side ${i}`);
+  });
+});
+
+test("polygon area, label point, size text and corners for fitting the map", () => {
+  close(G.areaM2(ELL), 1200, 0.1);
+  close(G.areaM2({ ...ELL, points: [...ELL.points].reverse() }), G.areaM2(ELL));
+  for (const poly of [ELL, YOU]) {
+    const lp = G.labelPoint(poly);
+    assert.ok(G.contains(poly, lp.lat, lp.lon));
+  }
+  const lp = G.labelPoint(YOU); // the middle is in the notch: the label goes into an arm
+  assert.ok(!G.contains(YOU, ...at(0, 0)) && Math.abs(G.geoToLocal(NORTH, lp.lat, lp.lon).x) > 10);
+  assert.equal(G.formatSize(ELL), "1 200 m² · 6 corners");
+  assert.equal(G.formatSize(BOX), "100 m × 40 m");
+  assert.equal(G.formatArea(1240.4), "1 240 m²");
+  assert.equal(G.formatArea(2_500_000), "2.5 km²");
+  const [[s, w], [n, e]] = G.bounds([ELL]);
+  close(s, at(0, -20)[0]); close(n, at(0, 20)[0]); close(w, at(-20, 0)[1]); close(e, at(20, 0)[1]);
+});
+
+test("polygon outline follows every side and is subdivided like a rectangle's", () => {
+  const ring = G.outline(ELL, 4);
+  assert.equal(ring.length, 6 * 4);
+  ELL.points.forEach(([lat, lon], i) => { close(ring[i * 4].lat, lat, 1e-12); close(ring[i * 4].lon, lon, 1e-12); });
+  for (const p of ring) assert.ok(G.contains(ELL, p.lat, p.lon));
+});
+
+test("smallest area wins between a polygon and a rectangle", () => {
+  assert.equal(G.findZone([BOX, ELL], ...at(-10, -10)).id, "p");
+  assert.equal(G.findZone([BOX, ELL], ...at(10, 10)), BOX); // in the L's notch: only the rectangle
+});
+
+test("selfIntersects finds crossing, touching and repeated corners", () => {
+  assert.ok(!G.selfIntersects(ELL.points));
+  assert.ok(!G.selfIntersects(YOU.points));
+  assert.ok(G.selfIntersects([at(0, 0), at(10, 10), at(10, 0), at(0, 10)])); // bow tie
+  assert.ok(G.selfIntersects([at(0, 0), at(10, 0), at(10, 10), at(0, 0)])); // repeated corner
+  assert.ok(G.selfIntersects([at(0, 0), at(20, 0), at(10, 0), at(10, 10)])); // folds back
+  assert.ok(G.selfIntersects([at(0, 0), at(20, 0), at(20, 20), at(10, 0), at(0, 20)])); // corner on a side
 });
 
 test("a box without a shape is a rectangle", () => {

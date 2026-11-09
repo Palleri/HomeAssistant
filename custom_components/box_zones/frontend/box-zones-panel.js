@@ -431,6 +431,17 @@ class BoxZonesPanel extends HTMLElement {
       return h("label", { class: "field" }, label, input);
     };
     this._fields = {};
+    if (G.shapeOf(d) === G.POLYGON) {
+      // Polygons can be renamed and deleted here; changing the outline comes later.
+      return [h("section", {},
+        h("div", { class: "head" }, h("h2", {}, m.isNew ? "New polygon" : "Edit polygon")),
+        h("label", { class: "field" }, "Name (this is what the location entity will show)", name),
+        h("div", { class: "actions" },
+          h("button", { class: "primary", onclick: () => this._save(), disabled: this._busy }, "Save"),
+          h("button", { onclick: () => this._cancel(), disabled: this._busy }, "Cancel"),
+          h("span", { class: "spacer" }),
+          m.isNew ? null : h("button", { class: "danger", onclick: () => this._delete(), disabled: this._busy }, "Delete")))];
+    }
     const view = h("section", {},
       h("div", { class: "head" }, h("h2", {}, m.isNew ? "New box" : "Edit box")),
       h("label", { class: "field" }, "Name (this is what the location entity will show)", name),
@@ -505,7 +516,7 @@ class BoxZonesPanel extends HTMLElement {
   /** A copy of the box being edited, right next to it, opened as a new box. */
   _duplicate() {
     const d = this._mode.draft;
-    if (!d || this._busy) return;
+    if (!d || this._busy || G.shapeOf(d) !== G.RECTANGLE) return;
     const gap = Math.max(1, d.width_m * 0.1);
     const p = G.localToGeo(d, d.width_m + gap, 0);
     const draft = { ...d, id: G.newId(), name: G.nextName(d.name.trim() || "Box", this._zones.map((z) => z.name)), lat: p.lat, lon: p.lon };
@@ -672,7 +683,9 @@ class BoxZonesPanel extends HTMLElement {
 
   _syncHandles() {
     const L = this._L;
-    const editing = this._mode.view === "edit" ? this._mode.draft : null;
+    // Only rectangles have resize and turn handles.
+    const draft = this._mode.view === "edit" ? this._mode.draft : null;
+    const editing = draft && G.shapeOf(draft) === G.RECTANGLE ? draft : null;
     if (this._handles && (!editing || this._handles.id !== editing.id)) {
       for (const mk of Object.values(this._handles.markers)) mk.remove();
       this._handles.line.remove();
@@ -732,6 +745,7 @@ class BoxZonesPanel extends HTMLElement {
   _placeHandles(skip) {
     if (!this._handles || this._mode.view !== "edit") return;
     const d = this._mode.draft;
+    if (G.shapeOf(d) !== G.RECTANGLE) return;
     for (const [key, [sx, sy]] of Object.entries(G.HANDLES)) {
       if (key === skip) continue;
       const p = G.localToGeo(d, (sx * d.width_m) / 2, (sy * d.height_m) / 2);
@@ -752,6 +766,8 @@ class BoxZonesPanel extends HTMLElement {
   /** "move" (inside the box), "turn" (on its edge) or null (let the map pan). */
   _gestureAt(e) {
     if (this._mode.view !== "edit" || !this._map) return null;
+    // A polygon can't be moved or turned on the map yet: let the map pan.
+    if (G.shapeOf(this._mode.draft) !== G.RECTANGLE) return null;
     for (const n of e.composedPath()) {
       if (n === this._mapEl) break;
       if (n.classList && n.classList.contains("zb-h-rotate")) return "turn";
