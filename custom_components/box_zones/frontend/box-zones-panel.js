@@ -60,7 +60,7 @@ const TAP_PX = { mouse: 6, touch: 12 };
 const CLOSE_PX = { mouse: 12, touch: 24 };
 const EDIT_COLOR = "#ff9800";
 const DEVICE_COLOR = "#2e7d32";
-// A polygon being edited whose outline crosses itself.
+// A polygon being edited or drawn whose outline can't be saved (it crosses itself, say).
 const ERROR_COLOR = "#db4437";
 
 const STATE_LABELS = { home: "Home", not_home: "Away", unavailable: "Unavailable", unknown: "Unknown" };
@@ -522,11 +522,11 @@ class BoxZonesPanel extends HTMLElement {
     if (!dr || !ui) return;
     const n = dr.points.length;
     const corners = `${n} corner${n === 1 ? "" : "s"}`;
+    const problem = dr.closed ? this._problemOf(dr.points) : null;
     let text;
-    if (dr.closed) {
-      text = G.selfIntersects(dr.points)
-        ? `${G.CROSSING_ERROR}. Press Undo and place the corners again.`
-        : `Outline closed: ${G.formatArea(G.areaM2({ shape: G.POLYGON, points: dr.points }))}, ${corners}. Press Save to keep it.`;
+    if (problem) text = `${problem}. Press Undo and place the corners again.`;
+    else if (dr.closed) {
+      text = `Outline closed: ${G.formatArea(G.areaM2({ shape: G.POLYGON, points: dr.points }))}, ${corners}. Press Save to keep it.`;
     } else if (n === 0) text = "No corners yet.";
     else if (n >= G.MAX_CORNERS) text = `${corners}, the most a box can have. Close the outline to finish.`;
     else if (n < G.MIN_CORNERS) text = `${corners} placed. A polygon needs at least ${G.MIN_CORNERS}.`;
@@ -534,7 +534,8 @@ class BoxZonesPanel extends HTMLElement {
     ui.status.textContent = text;
     ui.undo.disabled = this._busy || n === 0;
     ui.done.disabled = this._busy || !G.canCloseDrawing(dr);
-    ui.save.disabled = this._busy || !G.canSaveDrawing(dr);
+    // The same as G.canSaveDrawing, with the outline checked only once.
+    ui.save.disabled = this._busy || !dr.closed || !!problem;
     ui.cancel.disabled = this._busy;
   }
 
@@ -663,10 +664,15 @@ class BoxZonesPanel extends HTMLElement {
       d.points = dr.points;
     }
     if (!d.name.trim()) { this._setError("Give the box a name first."); return; }
-    if (G.shapeOf(d) === G.POLYGON && G.selfIntersects(d.points)) { this._setError(G.CROSSING_ERROR); return; }
+    const zone = { ...d, name: d.name.trim() };
+    if (G.shapeOf(d) === G.POLYGON) {
+      const problem = this._problemOf(d.points);
+      if (problem) { this._setError(problem); return; }
+      zone.points = G.wrapOutline(d.points);
+    }
     this._busy = true;
     try {
-      const res = await this._hass.callWS({ type: "box_zones/save_zone", zone: { ...d, name: d.name.trim() } });
+      const res = await this._hass.callWS({ type: "box_zones/save_zone", zone });
       this._apply(res);
       this._mode = { view: "list" };
       this._error = "";
@@ -758,17 +764,19 @@ class BoxZonesPanel extends HTMLElement {
     }
     for (const z of zones) {
       const isEdit = z.id === editing;
-      // A polygon being edited whose outline crosses itself is drawn red and dashed.
-      const crossing = isEdit && G.shapeOf(z) === G.POLYGON && G.selfIntersects(z.points);
-      const color = crossing ? ERROR_COLOR : isEdit ? EDIT_COLOR : primary;
+      const editedPolygon = isEdit && G.shapeOf(z) === G.POLYGON;
+      // A polygon being edited that can't be saved (it crosses itself, say) is drawn red and dashed.
+      const bad = editedPolygon && !!this._problemOf(z.points);
+      const color = bad ? ERROR_COLOR : isEdit ? EDIT_COLOR : primary;
       const style = {
         color, fillColor: color, weight: isEdit ? 3 : 2,
         fillOpacity: isEdit ? 0.25 : editing ? 0.08 : 0.18, opacity: editing && !isEdit ? 0.5 : 1,
-        dashArray: crossing ? "8 6" : null,
+        dashArray: bad ? "8 6" : null,
       };
       const pts = G.outline(z).map((p) => [p.lat, p.lon]);
-      // A crossing outline has no proper inside to put the label in (it is hidden while editing anyway).
-      const lp = crossing ? { lat: z.points[0][0], lon: z.points[0][1] } : G.labelPoint(z), labelAt = [lp.lat, lp.lon];
+      // An outline being edited may cross itself and have no proper inside for the label
+      // (G.labelPoint can throw then); the label is hidden while editing anyway.
+      const lp = editedPolygon ? { lat: z.points[0][0], lon: z.points[0][1] } : G.labelPoint(z), labelAt = [lp.lat, lp.lon];
       let l = this._zoneLayers.get(z.id);
       if (!l) {
         const poly = L.polygon(pts, style).addTo(this._map);
@@ -816,6 +824,9 @@ class BoxZonesPanel extends HTMLElement {
     const { fill, line, dots } = this._drawLayers;
     const pts = dr.points;
     if (dr.closed) {
+      // Like an edited polygon: a closed outline that can't be saved is red and dashed.
+      const color = this._problemOf(pts) ? ERROR_COLOR : EDIT_COLOR;
+      fill.setStyle({ color, fillColor: color, dashArray: color === ERROR_COLOR ? "8 6" : null });
       fill.setLatLngs(G.outline({ shape: G.POLYGON, points: pts }).map((p) => [p.lat, p.lon]));
       line.setLatLngs([]);
     } else {
@@ -862,9 +873,12 @@ class BoxZonesPanel extends HTMLElement {
     if (!t || t.id !== e.pointerId || e.type !== "pointerup") return;
     const px = this._map.mouseEventToContainerPoint(e);
     if (!G.isTap(t.at, px, touch ? TAP_PX.touch : TAP_PX.mouse)) return;
-    const ll = this._map.containerPointToLatLng(px).wrap();
+    const ll = this._map.containerPointToLatLng(px);
+    // Not wrapped to -180..180: the corners stay next to each other and to what the map shows,
+    // also across the antimeridian. Save moves the outline onto the stored copy (G.wrapOutline).
+    const lon = dr.points.length ? G.unwrapLon(ll.lng, dr.points[0][1]) : ll.lng;
     const cornersPx = dr.points.map((p) => this._map.latLngToContainerPoint(p));
-    this._setDrawing(G.tapDrawing(dr, [ll.lat, ll.lng], px, cornersPx, touch ? CLOSE_PX.touch : CLOSE_PX.mouse));
+    this._setDrawing(G.tapDrawing(dr, [ll.lat, lon], px, cornersPx, touch ? CLOSE_PX.touch : CLOSE_PX.mouse));
   }
 
   _syncHandles() {
@@ -1052,7 +1066,8 @@ class BoxZonesPanel extends HTMLElement {
     const d = m.draft;
     const atMin = d.points.length <= G.MIN_CORNERS;
     this._polyInfo = h("span", {});
-    this._polyWarn = h("div", { class: "error", hidden: true }, G.CROSSING_ERROR);
+    this._polyWarn = h("div", { class: "error", hidden: true });
+    this._polySave = h("button", { class: "primary", onclick: () => this._save() }, "Save");
     const view = h("section", {},
       h("div", { class: "head" }, h("h2", {}, m.isNew ? "New polygon" : "Edit polygon")),
       h("label", { class: "field" }, "Name (this is what the location entity will show)", name),
@@ -1067,7 +1082,7 @@ class BoxZonesPanel extends HTMLElement {
       this._polyWarn,
       h("details", {}, h("summary", {}, "Exact size"), h("p", { class: "hint" }, this._polyInfo)),
       h("div", { class: "actions" },
-        h("button", { class: "primary", onclick: () => this._save(), disabled: this._busy }, "Save"),
+        this._polySave,
         h("button", { onclick: () => this._cancel(), disabled: this._busy }, "Cancel"),
         h("span", { class: "spacer" }),
         m.isNew ? null : h("button", { class: "danger", onclick: () => this._delete(), disabled: this._busy }, "Delete")));
@@ -1075,12 +1090,28 @@ class BoxZonesPanel extends HTMLElement {
     return [view];
   }
 
-  /** "Exact size" (area and corners) and the crossing warning, kept up to date while dragging. */
+  /** "Exact size" (area and corners), and why Save is off (the outline crosses itself, say), kept up to date while dragging. */
   _updatePolygonInfo() {
     const d = this._mode.draft;
     if (!this._polyInfo || !d || G.shapeOf(d) !== G.POLYGON) return;
+    const problem = this._problemOf(d.points);
     this._polyInfo.textContent = G.formatSize(d);
-    this._polyWarn.hidden = !G.selfIntersects(d.points);
+    this._polyWarn.textContent = problem || "";
+    this._polyWarn.hidden = !problem;
+    this._polySave.disabled = this._busy || !!problem;
+  }
+
+  /**
+   * Why the server would refuse this outline, or null (G.outlineProblem). Remembered for
+   * the last outline: the style and the editor both ask after every change, and an
+   * outline's array is always replaced, never changed in place.
+   */
+  _problemOf(points) {
+    const memo = this._problemMemo;
+    if (memo && memo.points === points) return memo.problem;
+    const problem = G.outlineProblem(points);
+    this._problemMemo = { points, problem };
+    return problem;
   }
 
   _syncPolygonHandles() {

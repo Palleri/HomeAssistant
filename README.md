@@ -58,9 +58,10 @@ To change a saved polygon, tap it on the map or in the list:
 - drag inside the polygon, or on a side, to move the whole polygon.
 
 A polygon may be concave (an L or U shape) but its outline must not cross
-itself: a crossing outline turns red and **Save** refuses it with "The outline
-crosses itself". A polygon has 3 to 100 corners, and like a rectangle it must
-be at least 4 m² and at most 50 km across.
+itself: a crossing outline turns red and dashed, the page says "The outline
+crosses itself", and **Save** stays off until you fix it. A polygon has 3 to
+100 corners, and like a rectangle it must be at least 4 m² and at most 50 km
+across; an outline that breaks one of these rules is shown the same way.
 
 ## What you get
 
