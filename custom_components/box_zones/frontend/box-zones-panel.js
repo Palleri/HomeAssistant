@@ -63,6 +63,52 @@ const DEVICE_COLOR = "#2e7d32";
 // A polygon being edited or drawn whose outline can't be saved (it crosses itself, say).
 const ERROR_COLOR = "#db4437";
 
+/*
+ * The editor for each shape, chosen with shapeOf(draft) like the SHAPES table in
+ * geo.js. The shared editing code (rendering, handles, drag gestures, saving)
+ * asks the editor for anything that depends on the shape; `p` is the panel.
+ * A new shape adds an entry here. (Drawing a new polygon is its own mode, see
+ * _renderDrawing and _onDrawPointer.)
+ */
+const EDITORS = {
+  rectangle: {
+    render: (p, name) => p._renderRectEdit(name),
+    /** Create, keep or remove the shape's handles; `d` is null when no box of this shape is edited. */
+    syncHandles: (p, d) => p._syncRectHandles(d),
+    placeHandles: (p, d, skip) => p._placeRectHandles(d, skip),
+    /** "move", "turn" or null (the map pans) for a pointer down at `e`. */
+    gestureAt: (p, e, d) => p._rectGestureAt(e, d),
+    /** The screen point a "turn" goes around. */
+    turnCentre: (p, d) => p._map.latLngToContainerPoint([d.lat, d.lon]),
+    move: (d, base, dLat, dLon) => { d.lat = base.lat + dLat; d.lon = base.lon + dLon; },
+    /** Bring the editor's fields up to date after a drag. */
+    updateInfo: (p, d) => p._updateRectFields(d),
+    /** Why Save would be refused, or null. The rectangle's fields and handles keep it valid. */
+    problem: () => null,
+    /** The box as sent to the server. */
+    toSave: (d) => d,
+    canDuplicate: true,
+  },
+  polygon: {
+    render: (p, name) => p._renderPolygonEdit(name),
+    syncHandles: (p, d) => p._syncPolygonHandles(d),
+    placeHandles: (p) => p._placePolygonHandles(),
+    gestureAt: (p, e, d) => p._polygonGestureAt(e, d),
+    turnCentre: null, // polygons only move
+    move: (d, base, dLat, dLon) => { d.points = G.shiftPoints(base.points, dLat, dLon); },
+    updateInfo: (p) => p._updatePolygonInfo(),
+    problem: (p, d) => p._problemOf(d.points),
+    toSave: (d) => ({ ...d, points: G.wrapOutline(d.points) }),
+    canDuplicate: false,
+  },
+};
+
+function editorFor(d) {
+  const ed = EDITORS[G.shapeOf(d)];
+  if (!ed) throw new Error(`Unknown shape: ${G.shapeOf(d)}`);
+  return ed;
+}
+
 const STATE_LABELS = { home: "Home", not_home: "Away", unavailable: "Unavailable", unknown: "Unknown" };
 const stateLabel = (s) => (s == null ? "Not created yet" : STATE_LABELS[s] || s);
 
@@ -456,6 +502,14 @@ class BoxZonesPanel extends HTMLElement {
       oninput: (e) => { d.name = e.target.value; this._syncZones(); },
       onkeydown: (e) => { if (e.key === "Enter") this._save(); else if (e.key === "Escape") this._cancel(); },
     });
+    this._fields = {};
+    if (m.drawing) return this._renderDrawing(name);
+    return editorFor(d).render(this, name);
+  }
+
+  _renderRectEdit(name) {
+    const m = this._mode;
+    const d = m.draft;
     const num = (key, label, step) => {
       const input = h("input", {
         type: "number", inputmode: "decimal", step, value: String(Math.round(d[key] * 10) / 10),
@@ -470,9 +524,6 @@ class BoxZonesPanel extends HTMLElement {
       this._fields[key] = input;
       return h("label", { class: "field" }, label, input);
     };
-    this._fields = {};
-    if (m.drawing) return this._renderDrawing(name);
-    if (G.shapeOf(d) === G.POLYGON) return this._renderPolygonEdit(name);
     const view = h("section", {},
       h("div", { class: "head" }, h("h2", {}, m.isNew ? "New rectangle" : "Edit rectangle")),
       h("label", { class: "field" }, "Name (this is what the location entity will show)", name),
@@ -541,8 +592,11 @@ class BoxZonesPanel extends HTMLElement {
 
   _updateFields() {
     const d = this._mode.draft;
-    if (!d) return;
-    this._updatePolygonInfo();
+    if (d) editorFor(d).updateInfo(this, d);
+  }
+
+  /** The rectangle's number fields (the one being typed in is left alone). */
+  _updateRectFields(d) {
     for (const [key, input] of Object.entries(this._fields)) {
       if (this.shadowRoot.activeElement !== input) input.value = String(Math.round(d[key] * 10) / 10);
     }
@@ -618,7 +672,7 @@ class BoxZonesPanel extends HTMLElement {
   /** A copy of the box being edited, right next to it, opened as a new box. */
   _duplicate() {
     const d = this._mode.draft;
-    if (!d || this._busy || G.shapeOf(d) !== G.RECTANGLE) return;
+    if (!d || this._busy || !editorFor(d).canDuplicate) return;
     const gap = Math.max(1, d.width_m * 0.1);
     const p = G.localToGeo(d, d.width_m + gap, 0);
     const draft = { ...d, id: G.newId(), name: G.nextName(d.name.trim() || "Box", this._zones.map((z) => z.name)), lat: p.lat, lon: p.lon };
@@ -664,12 +718,10 @@ class BoxZonesPanel extends HTMLElement {
       d.points = dr.points;
     }
     if (!d.name.trim()) { this._setError("Give the box a name first."); return; }
-    const zone = { ...d, name: d.name.trim() };
-    if (G.shapeOf(d) === G.POLYGON) {
-      const problem = this._problemOf(d.points);
-      if (problem) { this._setError(problem); return; }
-      zone.points = G.wrapOutline(d.points);
-    }
+    const ed = editorFor(d);
+    const problem = ed.problem(this, d);
+    if (problem) { this._setError(problem); return; }
+    const zone = { ...ed.toSave(d), name: d.name.trim() };
     this._busy = true;
     try {
       const res = await this._hass.callWS({ type: "box_zones/save_zone", zone });
@@ -764,9 +816,8 @@ class BoxZonesPanel extends HTMLElement {
     }
     for (const z of zones) {
       const isEdit = z.id === editing;
-      const editedPolygon = isEdit && G.shapeOf(z) === G.POLYGON;
-      // A polygon being edited that can't be saved (it crosses itself, say) is drawn red and dashed.
-      const bad = editedPolygon && !!this._problemOf(z.points);
+      // A box being edited that can't be saved (a polygon that crosses itself, say) is drawn red and dashed.
+      const bad = isEdit && !!editorFor(z).problem(this, z);
       const color = bad ? ERROR_COLOR : isEdit ? EDIT_COLOR : primary;
       const style = {
         color, fillColor: color, weight: isEdit ? 3 : 2,
@@ -774,9 +825,9 @@ class BoxZonesPanel extends HTMLElement {
         dashArray: bad ? "8 6" : null,
       };
       const pts = G.outline(z).map((p) => [p.lat, p.lon]);
-      // An outline being edited may cross itself and have no proper inside for the label
-      // (G.labelPoint can throw then); the label is hidden while editing anyway.
-      const lp = editedPolygon ? { lat: z.points[0][0], lon: z.points[0][1] } : G.labelPoint(z), labelAt = [lp.lat, lp.lon];
+      // The label is hidden while editing, and an outline being edited may cross itself and
+      // have no proper inside for it (G.labelPoint can throw then): park it on a corner.
+      const lp = isEdit ? G.boundsPoints(z)[0] : G.labelPoint(z), labelAt = [lp.lat, lp.lon];
       let l = this._zoneLayers.get(z.id);
       if (!l) {
         const poly = L.polygon(pts, style).addTo(this._map);
@@ -882,10 +933,16 @@ class BoxZonesPanel extends HTMLElement {
   }
 
   _syncHandles() {
+    const m = this._mode;
+    // While a new polygon is drawn it has no handles: taps place corners instead.
+    const d = m.view === "edit" && !m.drawing ? m.draft : null;
+    // Every shape's editor is asked, so the handles of a shape no longer edited go away.
+    for (const [shape, ed] of Object.entries(EDITORS)) ed.syncHandles(this, d && G.shapeOf(d) === shape ? d : null);
+  }
+
+  /** The rectangle's resize and turn handles, for `editing` (null: none). */
+  _syncRectHandles(editing) {
     const L = this._L;
-    // Only rectangles have resize and turn handles.
-    const draft = this._mode.view === "edit" ? this._mode.draft : null;
-    const editing = draft && G.shapeOf(draft) === G.RECTANGLE ? draft : null;
     if (this._handles && (!editing || this._handles.id !== editing.id)) {
       for (const mk of Object.values(this._handles.markers)) mk.remove();
       this._handles.line.remove();
@@ -903,8 +960,7 @@ class BoxZonesPanel extends HTMLElement {
       const line = L.polyline([], { color: EDIT_COLOR, weight: 2, dashArray: "4 4", interactive: false }).addTo(this._map);
       this._handles = { id: editing.id, markers, line };
     }
-    this._placeHandles();
-    this._syncPolygonHandles();
+    if (editing) this._placeRectHandles(editing);
   }
 
   _makeHandle(key) {
@@ -943,11 +999,15 @@ class BoxZonesPanel extends HTMLElement {
     this._updateFields();
   }
 
+  /** Put the edited box's handles where its corners and sides are now (except `skip`, being dragged). */
   _placeHandles(skip) {
-    if (this._mode.view === "edit" && G.shapeOf(this._mode.draft) === G.POLYGON) { this._placePolygonHandles(); return; }
-    if (!this._handles || this._mode.view !== "edit") return;
-    const d = this._mode.draft;
-    if (G.shapeOf(d) !== G.RECTANGLE) return;
+    const m = this._mode;
+    if (m.view !== "edit" || m.drawing) return;
+    editorFor(m.draft).placeHandles(this, m.draft, skip);
+  }
+
+  _placeRectHandles(d, skip) {
+    if (!this._handles || this._handles.id !== d.id) return;
     for (const [key, [sx, sy]] of Object.entries(G.HANDLES)) {
       if (key === skip) continue;
       const p = G.localToGeo(d, (sx * d.width_m) / 2, (sy * d.height_m) / 2);
@@ -976,7 +1036,11 @@ class BoxZonesPanel extends HTMLElement {
       if (n.classList && (n.classList.contains("zb-h") || n.classList.contains("leaflet-control"))) return null;
     }
     const d = this._mode.draft;
-    if (G.shapeOf(d) === G.POLYGON) return this._polygonGestureAt(e);
+    return editorFor(d).gestureAt(this, e, d);
+  }
+
+  /** "move" (inside the rectangle), "turn" (on its edge) or null. */
+  _rectGestureAt(e, d) {
     const pt = this._map.mouseEventToContainerPoint(e);
     const cs = G.corners(d).map((p) => this._map.latLngToContainerPoint([p.lat, p.lon]));
     let edge = Infinity;
@@ -999,8 +1063,9 @@ class BoxZonesPanel extends HTMLElement {
     e.stopImmediatePropagation();
     const d = this._mode.draft;
     const pt = this._map.mouseEventToContainerPoint(e);
-    // The middle that turning goes around; polygons only move, never turn.
-    const c = G.shapeOf(d) === G.RECTANGLE ? this._map.latLngToContainerPoint([d.lat, d.lon]) : pt;
+    // The middle that turning goes around (a shape without one only moves).
+    const ed = editorFor(d);
+    const c = ed.turnCentre ? ed.turnCentre(this, d) : pt;
     const fromButton = e.composedPath().some((n) => n.classList && n.classList.contains("zb-h-rotate"));
     this._gesture = {
       kind, fromButton, pointerId: e.pointerId, base: { ...d },
@@ -1027,12 +1092,7 @@ class BoxZonesPanel extends HTMLElement {
     const pt = this._map.mouseEventToContainerPoint(e);
     g.pointLL = this._map.containerPointToLatLng(pt);
     if (g.kind === "move") {
-      const ll = this._map.containerPointToLatLng(pt);
-      if (G.shapeOf(d) === G.POLYGON) d.points = G.shiftPoints(g.base.points, ll.lat - g.startLL.lat, ll.lng - g.startLL.lng);
-      else {
-        d.lat = g.base.lat + ll.lat - g.startLL.lat;
-        d.lon = g.base.lon + ll.lng - g.startLL.lng;
-      }
+      editorFor(d).move(d, g.base, g.pointLL.lat - g.startLL.lat, g.pointLL.lng - g.startLL.lng);
     } else {
       // Turn by how far the pointer went around the middle, not by where it points:
       // no jump when you grab the edge, and finer control further from the middle.
@@ -1093,7 +1153,7 @@ class BoxZonesPanel extends HTMLElement {
   /** "Exact size" (area and corners), and why Save is off (the outline crosses itself, say), kept up to date while dragging. */
   _updatePolygonInfo() {
     const d = this._mode.draft;
-    if (!this._polyInfo || !d || G.shapeOf(d) !== G.POLYGON) return;
+    if (!this._polyInfo || !d) return;
     const problem = this._problemOf(d.points);
     this._polyInfo.textContent = G.formatSize(d);
     this._polyWarn.textContent = problem || "";
@@ -1114,10 +1174,9 @@ class BoxZonesPanel extends HTMLElement {
     return problem;
   }
 
-  _syncPolygonHandles() {
+  /** The corner and side handles of `d`, the polygon being edited (null: none). */
+  _syncPolygonHandles(d) {
     const m = this._mode;
-    // While a new polygon is drawn it has no handles: taps place corners instead.
-    const d = m.view === "edit" && !m.drawing && G.shapeOf(m.draft) === G.POLYGON ? m.draft : null;
     const ph = this._polyHandles;
     // Rebuilt whenever the corners or the selection change, so each handle keeps its index.
     if (ph && (!d || ph.id !== d.id || ph.corners.length !== d.points.length || ph.sel !== m.corner)) {
@@ -1205,7 +1264,7 @@ class BoxZonesPanel extends HTMLElement {
       m.corner = null;
       this._render();
     }
-    this._syncPolygonHandles();
+    this._syncHandles();
   }
 
   _selectCorner(i) {
@@ -1213,7 +1272,7 @@ class BoxZonesPanel extends HTMLElement {
     if (m.view !== "edit") return;
     m.corner = m.corner === i ? null : i;
     this._render();
-    this._syncPolygonHandles();
+    this._syncHandles();
   }
 
   _removeCorner(i) {
@@ -1226,12 +1285,11 @@ class BoxZonesPanel extends HTMLElement {
     this._error = "";
     this._render();
     this._syncZones();
-    this._syncPolygonHandles();
+    this._syncHandles();
   }
 
   /** "move" when the pointer is inside the polygon or on a side, else null (the map pans). */
-  _polygonGestureAt(e) {
-    const d = this._mode.draft;
+  _polygonGestureAt(e, d) {
     const pt = this._map.mouseEventToContainerPoint(e);
     const cs = d.points.map((p) => this._map.latLngToContainerPoint(p));
     const tol = e.pointerType === "touch" ? EDGE_PX.touch : EDGE_PX.mouse;
