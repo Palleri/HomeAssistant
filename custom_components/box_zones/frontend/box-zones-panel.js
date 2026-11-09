@@ -54,6 +54,10 @@ const TILE_KEY = "box-zones-tiles";
 const MAX_ZOOM = 23;
 // How close (screen pixels) to the box's edge a drag turns the box instead of moving it.
 const EDGE_PX = { mouse: 10, touch: 20 };
+// Drawing a polygon: a pointer that moves less than TAP_PX between down and up is a
+// tap (it places a corner); a tap within CLOSE_PX of the first corner closes the outline.
+const TAP_PX = { mouse: 6, touch: 12 };
+const CLOSE_PX = { mouse: 12, touch: 24 };
 const EDIT_COLOR = "#ff9800";
 const DEVICE_COLOR = "#2e7d32";
 
@@ -141,6 +145,8 @@ label.field input { display: block; width: 100%; margin-top: 4px; height: 44px; 
 .row3 label.field input { font-size: 15px; padding: 0 8px; }
 .actions { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
 .actions .spacer { flex: 1; }
+.actions + .actions { margin-top: 12px; }
+.steps.drawsteps { margin: 16px 0 0; }
 details { margin-bottom: 14px; }
 summary { cursor: pointer; color: var(--secondary-text-color); font-size: 14px; margin-bottom: 10px; }
 .steps { margin: 0 0 14px; padding-left: 20px; color: var(--secondary-text-color); font-size: 14px; line-height: 1.6; }
@@ -164,6 +170,7 @@ summary { cursor: pointer; color: var(--secondary-text-color); font-size: 14px; 
 .zb-h-rotate::after { inset: 3px; border-radius: 50%; background: #fff ${svgUrl(ICON_ROTATE, EDIT_COLOR)} center / 18px no-repeat; }
 .zb-cur-move, .zb-cur-move .leaflet-interactive { cursor: move !important; }
 .zb-cur-turn, .zb-cur-turn .leaflet-interactive { cursor: ${svgUrl(ICON_ROTATE, "#212121").replace(/"\)$/, '") 12 12')}, alias !important; }
+.zb-cur-draw, .zb-cur-draw .leaflet-interactive { cursor: crosshair !important; }
 .zb-msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px; text-align: center;
   color: var(--secondary-text-color); }
 /* Our own display rules would otherwise beat the hidden attribute, leaving an invisible
@@ -189,6 +196,13 @@ class BoxZonesPanel extends HTMLElement {
     this._fields = {};
     this._listSig = "";
     this._fitted = false;
+    this._drawLayers = null; // the outline and corner dots while drawing a new polygon
+    this._tap = null; // the pointer that may become a tap while drawing
+    this._pointers = new Set(); // pointers down on the map (two or more: a pinch, not a tap)
+    this._onKey = (e) => {
+      // Escape throws away a polygon being drawn, wherever the focus is.
+      if (e.key === "Escape" && this._mode.view === "edit" && this._mode.drawing && !this._busy) this._cancel();
+    };
   }
 
   set hass(hass) {
@@ -211,6 +225,11 @@ class BoxZonesPanel extends HTMLElement {
 
   connectedCallback() {
     if (this._map) setTimeout(() => this._map.invalidateSize(), 0);
+    window.addEventListener("keydown", this._onKey);
+  }
+
+  disconnectedCallback() {
+    window.removeEventListener("keydown", this._onKey);
   }
 
   // ---------------------------------------------------------------- setup
@@ -293,6 +312,10 @@ class BoxZonesPanel extends HTMLElement {
     const home = this._hass.config || {};
     map.setView([home.latitude || 0, home.longitude || 0], home.latitude ? 16 : 2);
     map.on("zoomend viewreset resize", () => { if (!this._drag) this._placeHandles(); });
+    // Drawing a polygon: watch for taps without stopping Leaflet, so panning and zooming still work.
+    for (const type of ["pointerdown", "pointerup", "pointercancel"]) {
+      this._mapEl.addEventListener(type, (e) => this._onDrawPointer(e), true);
+    }
     // Capture phase: decide before Leaflet whether a drag moves/turns the box or pans the map.
     this._mapEl.addEventListener("pointerdown", (e) => this._onPointerDown(e), true);
     this._mapEl.addEventListener("pointermove", (e) => this._onPointerMove(e), true);
@@ -327,6 +350,8 @@ class BoxZonesPanel extends HTMLElement {
     const m = this._mode;
     if (m.view !== "edit") return this._zones;
     const others = this._zones.filter((z) => z.id !== m.draft.id);
+    // A polygon being drawn has its own layers (it may have too few corners for a box).
+    if (m.drawing) return others;
     return [...others, m.draft];
   }
 
@@ -377,7 +402,9 @@ class BoxZonesPanel extends HTMLElement {
     const infos = this._trackers.map((t) => this._trackerInfo(t));
     const boxes = h("section", {},
       h("div", { class: "head" }, h("h2", {}, "Boxes"),
-        h("button", { class: "primary", onclick: () => this._newBox(), disabled: !this._map }, "+ New box")),
+        h("div", { class: "actions" },
+          h("button", { onclick: () => this._newBox(), disabled: !this._map }, "Add rectangle"),
+          h("button", { onclick: () => this._newPolygon(), disabled: !this._map }, "Add polygon"))),
       this._zones.length
         ? h("ul", {}, [...this._zones].sort((a, b) => a.name.localeCompare(b.name)).map((z) => {
           const here = infos.filter((i) => i.boxId === z.id).map((i) => i.name);
@@ -386,7 +413,7 @@ class BoxZonesPanel extends HTMLElement {
             h("div", { class: "grow" }, h("div", { class: "name" }, z.name), h("div", { class: "sub" }, G ? G.formatSize(z) : "")),
             here.length ? h("span", { class: "badge" }, here.length === 1 ? `${here[0]} is here` : `${here.length} here`) : null);
         }))
-        : h("p", { class: "hint" }, "No boxes yet. Press New box, then drag the box over the place you want."));
+        : h("p", { class: "hint" }, "No boxes yet. Press Add rectangle and drag the box over the place you want, or Add polygon and tap the map at each corner."));
 
     const devices = h("section", {},
       h("div", { class: "head" }, h("h2", {}, "Followed trackers"),
@@ -431,6 +458,7 @@ class BoxZonesPanel extends HTMLElement {
       return h("label", { class: "field" }, label, input);
     };
     this._fields = {};
+    if (m.drawing) return this._renderDrawing(name);
     if (G.shapeOf(d) === G.POLYGON) {
       // Polygons can be renamed and deleted here; changing the outline comes later.
       return [h("section", {},
@@ -443,7 +471,7 @@ class BoxZonesPanel extends HTMLElement {
           m.isNew ? null : h("button", { class: "danger", onclick: () => this._delete(), disabled: this._busy }, "Delete")))];
     }
     const view = h("section", {},
-      h("div", { class: "head" }, h("h2", {}, m.isNew ? "New box" : "Edit box")),
+      h("div", { class: "head" }, h("h2", {}, m.isNew ? "New rectangle" : "Edit rectangle")),
       h("label", { class: "field" }, "Name (this is what the location entity will show)", name),
       h("ol", { class: "steps" },
         h("li", {}, "Drag inside the box to move it."),
@@ -459,6 +487,52 @@ class BoxZonesPanel extends HTMLElement {
         m.isNew ? null : h("button", { class: "danger", onclick: () => this._delete(), disabled: this._busy }, "Delete")));
     if (m.isNew) setTimeout(() => { name.focus(); name.select(); }, 50);
     return [view];
+  }
+
+  /** The editor while drawing a new polygon. */
+  _renderDrawing(name) {
+    const ui = {
+      status: h("p", { class: "hint", role: "status" }),
+      undo: h("button", { onclick: () => this._setDrawing(G.undoCorner(this._mode.drawing)) }, "Undo"),
+      done: h("button", { onclick: () => this._setDrawing(G.closeDrawing(this._mode.drawing)) }, "Done"),
+      save: h("button", { class: "primary", onclick: () => this._save() }, "Save"),
+      cancel: h("button", { onclick: () => this._cancel() }, "Cancel"),
+    };
+    this._drawUi = ui;
+    this._updateDrawUi();
+    return [h("section", {},
+      h("div", { class: "head" }, h("h2", {}, "New polygon")),
+      h("label", { class: "field" }, "Name (this is what the location entity will show)", name),
+      // Status and buttons above the steps, so they stay in view on a phone's half-height panel.
+      ui.status,
+      h("div", { class: "actions" }, ui.undo, ui.done),
+      h("div", { class: "actions" }, ui.save, ui.cancel),
+      h("ol", { class: "steps drawsteps" },
+        h("li", {}, "Tap the map at each corner of the place, going round it in order. Dragging moves the map and places no corner."),
+        h("li", {}, "Close the outline by tapping the first corner, or press Done."),
+        h("li", {}, "Undo removes the last corner.")))];
+  }
+
+  /** Update the drawing editor's status and buttons without rebuilding it (keeps focus in the name). */
+  _updateDrawUi() {
+    const dr = this._mode.drawing, ui = this._drawUi;
+    if (!dr || !ui) return;
+    const n = dr.points.length;
+    const corners = `${n} corner${n === 1 ? "" : "s"}`;
+    let text;
+    if (dr.closed) {
+      text = G.selfIntersects(dr.points)
+        ? `${G.CROSSING_ERROR}. Press Undo and place the corners again.`
+        : `Outline closed: ${G.formatArea(G.areaM2({ shape: G.POLYGON, points: dr.points }))}, ${corners}. Press Save to keep it.`;
+    } else if (n === 0) text = "No corners yet.";
+    else if (n >= G.MAX_CORNERS) text = `${corners}, the most a box can have. Close the outline to finish.`;
+    else if (n < G.MIN_CORNERS) text = `${corners} placed. A polygon needs at least ${G.MIN_CORNERS}.`;
+    else text = `${corners} placed. Tap the first corner or press Done to close the outline.`;
+    ui.status.textContent = text;
+    ui.undo.disabled = this._busy || n === 0;
+    ui.done.disabled = this._busy || !G.canCloseDrawing(dr);
+    ui.save.disabled = this._busy || !G.canSaveDrawing(dr);
+    ui.cancel.disabled = this._busy;
   }
 
   _updateFields() {
@@ -503,14 +577,37 @@ class BoxZonesPanel extends HTMLElement {
     const b = map.getBounds();
     const viewW = map.distance([c.lat, b.getWest()], [c.lat, b.getEast()]);
     const width = G.niceMetres(Math.min(5000, Math.max(10, viewW * 0.3)));
-    const names = new Set(this._zones.map((z) => z.name));
-    let n = this._zones.length + 1;
-    while (names.has(`Box ${n}`)) n++;
-    const draft = { id: G.newId(), name: `Box ${n}`, shape: G.RECTANGLE, lat: c.lat, lon: c.lng, width_m: width, height_m: G.niceMetres(width * 0.6), rotation_deg: 0 };
+    const draft = { id: G.newId(), name: this._freshName(), shape: G.RECTANGLE, lat: c.lat, lon: c.lng, width_m: width, height_m: G.niceMetres(width * 0.6), rotation_deg: 0 };
     this._mode = { view: "edit", draft, isNew: true };
     this._error = "";
     this._render();
     this._syncMap();
+  }
+
+  /** "Box 3": the default name of a new box, rectangle or polygon. */
+  _freshName() {
+    const names = new Set(this._zones.map((z) => z.name));
+    let n = this._zones.length + 1;
+    while (names.has(`Box ${n}`)) n++;
+    return `Box ${n}`;
+  }
+
+  /** Start drawing a new polygon: each tap on the map places a corner. */
+  _newPolygon() {
+    if (!this._map || this._mode.view === "edit") return;
+    const draft = { id: G.newId(), name: this._freshName(), shape: G.POLYGON, points: [] };
+    this._mode = { view: "edit", draft, isNew: true, drawing: G.startDrawing() };
+    this._error = "";
+    this._render();
+    this._syncMap();
+  }
+
+  _setDrawing(dr) {
+    const m = this._mode;
+    if (m.view !== "edit" || !m.drawing || dr === m.drawing) return;
+    m.drawing = dr;
+    this._updateDrawUi();
+    this._syncDrawing();
   }
 
   /** A copy of the box being edited, right next to it, opened as a new box. */
@@ -556,6 +653,11 @@ class BoxZonesPanel extends HTMLElement {
   async _save() {
     const d = this._mode.draft;
     if (!d || this._busy) return;
+    const dr = this._mode.drawing;
+    if (dr) {
+      if (!G.canSaveDrawing(dr)) return;
+      d.points = dr.points;
+    }
     if (!d.name.trim()) { this._setError("Give the box a name first."); return; }
     this._busy = true;
     try {
@@ -622,6 +724,7 @@ class BoxZonesPanel extends HTMLElement {
     this._syncZones();
     this._syncHandles();
     this._syncDevices();
+    this._syncDrawing();
   }
 
   _fitAll() {
@@ -679,6 +782,75 @@ class BoxZonesPanel extends HTMLElement {
       l.label.setOpacity(isEdit ? 0 : 1);
       if (isEdit) l.poly.bringToFront();
     }
+  }
+
+  /** The outline and corners of a polygon being drawn (nothing when not drawing). */
+  _syncDrawing() {
+    if (!this._map || !G) return;
+    const L = this._L, map = this._map;
+    const dr = this._mode.view === "edit" ? this._mode.drawing : null;
+    this._mapEl.classList.toggle("zb-cur-draw", !!dr && !dr.closed);
+    // A double tap would place two corners and zoom; keep it to placing corners.
+    if (dr) map.doubleClickZoom.disable(); else map.doubleClickZoom.enable();
+    if (!dr) {
+      if (this._drawLayers) { for (const l of Object.values(this._drawLayers)) l.remove(); this._drawLayers = null; }
+      return;
+    }
+    if (!this._drawLayers) {
+      // Not interactive: taps go through to the map, never to a box underneath.
+      this._drawLayers = {
+        fill: L.polygon([], { color: EDIT_COLOR, fillColor: EDIT_COLOR, weight: 3, fillOpacity: 0.25, interactive: false }).addTo(map),
+        line: L.polyline([], { color: EDIT_COLOR, weight: 3, interactive: false }).addTo(map),
+        dots: L.layerGroup().addTo(map),
+      };
+    }
+    const { fill, line, dots } = this._drawLayers;
+    const pts = dr.points;
+    if (dr.closed) {
+      fill.setLatLngs(G.outline({ shape: G.POLYGON, points: pts }).map((p) => [p.lat, p.lon]));
+      line.setLatLngs([]);
+    } else {
+      fill.setLatLngs([]);
+      line.setLatLngs(pts);
+    }
+    fill.bringToFront(); line.bringToFront();
+    dots.clearLayers();
+    pts.forEach((p, i) => {
+      // The first corner grows once tapping it would close the outline.
+      const first = i === 0 && G.canCloseDrawing(dr);
+      L.circleMarker(p, {
+        radius: first ? 10 : 5, color: first ? EDIT_COLOR : "#fff", weight: first ? 3 : 2,
+        fillColor: first ? "#fff" : EDIT_COLOR, fillOpacity: 1, interactive: false,
+      }).addTo(dots);
+    });
+  }
+
+  /** Pointer events on the map while drawing: a tap places a corner (or closes the outline); a pan or pinch does nothing. */
+  _onDrawPointer(e) {
+    if (e.type === "pointerdown") this._pointers.add(e.pointerId);
+    else this._pointers.delete(e.pointerId);
+    const dr = this._mode.view === "edit" ? this._mode.drawing : null;
+    if (!dr || dr.closed || !this._map) { this._tap = null; return; }
+    const touch = e.pointerType !== "mouse";
+    if (e.type === "pointerdown") {
+      this._tap = null;
+      if (!touch && e.button !== 0) return;
+      if (this._pointers.size > 1) return; // a second finger: pinch zoom
+      for (const n of e.composedPath()) {
+        if (n === this._mapEl) break;
+        if (n.classList && n.classList.contains("leaflet-control")) return; // zoom buttons, layer picker
+      }
+      this._tap = { id: e.pointerId, at: this._map.mouseEventToContainerPoint(e) };
+      return;
+    }
+    const t = this._tap;
+    this._tap = null;
+    if (!t || t.id !== e.pointerId || e.type !== "pointerup") return;
+    const px = this._map.mouseEventToContainerPoint(e);
+    if (!G.isTap(t.at, px, touch ? TAP_PX.touch : TAP_PX.mouse)) return;
+    const ll = this._map.containerPointToLatLng(px).wrap();
+    const cornersPx = dr.points.map((p) => this._map.latLngToContainerPoint(p));
+    this._setDrawing(G.tapDrawing(dr, [ll.lat, ll.lng], px, cornersPx, touch ? CLOSE_PX.touch : CLOSE_PX.mouse));
   }
 
   _syncHandles() {
@@ -766,6 +938,7 @@ class BoxZonesPanel extends HTMLElement {
   /** "move" (inside the box), "turn" (on its edge) or null (let the map pan). */
   _gestureAt(e) {
     if (this._mode.view !== "edit" || !this._map) return null;
+    if (this._mode.drawing) return null; // drawing a new polygon: taps place corners, drags pan
     // A polygon can't be moved or turned on the map yet: let the map pan.
     if (G.shapeOf(this._mode.draft) !== G.RECTANGLE) return null;
     for (const n of e.composedPath()) {

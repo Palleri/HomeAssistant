@@ -17,7 +17,7 @@ instead.
 2. **Set it up:**
    [![Add integration](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=box_zones)
    Pick the trackers to follow, for example your car.
-3. **Draw a box:** open **Box Zones** in the sidebar, press **New box**, give
+3. **Draw a box:** open **Box Zones** in the sidebar, press **Add rectangle**, give
    it a name and press **Save**. Drag inside the box to move it, the corners
    and side dots to resize it, and its edge to turn it.
 
