@@ -408,3 +408,57 @@ export function onOrInside(p, pts, tol) {
   for (let i = 0; i < pts.length; i++) if (distToSegment(p, pts[i], pts[(i + 1) % pts.length]) <= tol) return true;
   return pointInPolygon(p, pts);
 }
+
+// ------------------------------------------------- drawing a new polygon
+// The drawing state is {points: [[lat, lon], ...], closed}. Every function returns a
+// new state (or the same one when nothing changes); the page only does the taps.
+
+export function startDrawing() {
+  return { points: [], closed: false };
+}
+
+/** Add a corner at [lat, lon]; nothing happens once closed or at MAX_CORNERS. */
+export function addCorner(dr, point) {
+  if (dr.closed || dr.points.length >= MAX_CORNERS) return dr;
+  return { points: [...dr.points, [point[0], point[1]]], closed: false };
+}
+
+/** Remove the last corner. On a closed outline this also opens it again. */
+export function undoCorner(dr) {
+  if (!dr.points.length) return dr;
+  return { points: dr.points.slice(0, -1), closed: false };
+}
+
+export function canCloseDrawing(dr) {
+  return !dr.closed && dr.points.length >= MIN_CORNERS;
+}
+
+/** Close the outline (Done, or a tap on the first corner); needs MIN_CORNERS corners. */
+export function closeDrawing(dr) {
+  return canCloseDrawing(dr) ? { ...dr, closed: true } : dr;
+}
+
+/** Save is possible once the outline is closed with at least MIN_CORNERS corners. */
+export function canSaveDrawing(dr) {
+  return dr.closed && dr.points.length >= MIN_CORNERS;
+}
+
+/** Did the pointer stay within `tolPx` between down and up ({x, y} screen points), so it was a tap, not a pan? */
+export function isTap(down, up, tolPx) {
+  return Math.hypot(up.x - down.x, up.y - down.y) <= tolPx;
+}
+
+/**
+ * A tap while drawing, at `point` ([lat, lon]) and screen position `px`.
+ * `cornersPx` are the corners' screen positions. Within `tolPx` of the first
+ * corner (with enough corners) the tap closes the outline; on the last corner it
+ * does nothing (a double tap places one corner); otherwise it adds a corner.
+ */
+export function tapDrawing(dr, point, px, cornersPx, tolPx) {
+  if (dr.closed) return dr;
+  const n = cornersPx.length;
+  const near = (c) => Math.hypot(px.x - c.x, px.y - c.y) <= tolPx;
+  if (canCloseDrawing(dr) && near(cornersPx[0])) return closeDrawing(dr);
+  if (n && near(cornersPx[n - 1])) return dr;
+  return addCorner(dr, point);
+}
