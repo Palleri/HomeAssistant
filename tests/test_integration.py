@@ -523,3 +523,28 @@ async def test_version_1_boxes_load_as_rectangles(hass: HomeAssistant, hass_ws_c
     stored = hass_storage["box_zones.zones"]
     assert stored["version"] == 2
     assert stored["data"]["zones"][0] == {**old, "shape": "rectangle"}
+
+
+async def test_newer_storage_version_is_not_loaded(hass: HomeAssistant, hass_storage) -> None:
+    """Boxes saved by a newer Box Zones (a higher major version) are refused, not loaded and overwritten."""
+    newer = {"version": 3, "minor_version": 1, "key": "box_zones.zones",
+             "data": {"zones": [{"id": "abc", **BOX, "shape": "blob"}]}}
+    hass_storage["box_zones.zones"] = newer
+    hass.config.latitude, hass.config.longitude = HOME
+    entry = MockConfigEntry(domain=DOMAIN, title="Box Zones", data={}, version=1, minor_version=2,
+                            subentries_data=[tracker_subentry(hass, CAR)])
+    entry.add_to_hass(hass)
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is config_entries.ConfigEntryState.SETUP_ERROR
+    assert hass_storage["box_zones.zones"] == newer
+    assert hass.states.get(OURS) is None
+
+
+async def test_newer_minor_storage_version_loads(hass: HomeAssistant, hass_storage) -> None:
+    """A newer minor version of storage version 2 still loads (minor bumps stay readable)."""
+    hass_storage["box_zones.zones"] = {"version": 2, "minor_version": 5, "key": "box_zones.zones",
+                                       "data": {"zones": [{"id": "abc", **BOX, "shape": "rectangle"}]}}
+    car_at(hass, 52.5163, 13.3777)
+    await setup(hass)
+    assert hass.states.get(OURS).state == "Parking"

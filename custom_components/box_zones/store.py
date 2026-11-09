@@ -20,7 +20,12 @@ class _BoxStore(Store[dict[str, Any]]):
     ) -> dict[str, Any]:
         # 1 -> 2: the data stays as it is; a box without `shape` is a rectangle.
         # The major bump only stops older Box Zones from loading boxes they can't read.
-        return old_data
+        if old_major_version == 1:
+            return old_data
+        # Saved by a newer Box Zones (a higher major version): Home Assistant re-raises
+        # this, so setup fails and the file is left untouched (ADR 0001). A newer minor
+        # version of our own major version still loads as it is.
+        raise NotImplementedError
 
 
 class ZoneStore:
