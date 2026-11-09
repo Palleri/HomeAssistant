@@ -22,6 +22,7 @@ frontend/geo.js, so the map shows exactly what the entities use.
 
 from __future__ import annotations
 
+import functools
 import math
 import re
 import unicodedata
@@ -189,7 +190,7 @@ def _validate_rectangle(obj: dict[str, Any]) -> dict[str, Any]:
 Xy = tuple[float, float]
 
 
-def _plane(points: list[list[float]]) -> tuple[float, float, float, list[Xy]]:
+def _plane(points: Any) -> tuple[float, float, float, list[Xy]]:
     """(ref_lat, ref_lon, metres per degree of longitude, corners in the local plane).
 
     The reference point is the middle of the corners' lat/lon span.
@@ -199,6 +200,27 @@ def _plane(points: list[list[float]]) -> tuple[float, float, float, list[Xy]]:
     ref_lat, ref_lon = (min(lats) + max(lats)) / 2, (min(lons) + max(lons)) / 2
     m_lon = M_PER_DEG * math.cos(math.radians(ref_lat))
     return ref_lat, ref_lon, m_lon, [((lon - ref_lon) * m_lon, (lat - ref_lat) * M_PER_DEG) for lat, lon in points]
+
+
+class _Plane:
+    """A validated polygon's local plane, built once per outline (see _plane_of)."""
+
+    __slots__ = ("ref_lat", "ref_lon", "m_lon", "xy", "min_x", "max_x", "min_y", "max_y")
+
+    def __init__(self, points: tuple[tuple[float, float], ...]) -> None:
+        self.ref_lat, self.ref_lon, self.m_lon, self.xy = _plane(points)
+        self.min_x, self.max_x = min(x for x, _ in self.xy), max(x for x, _ in self.xy)
+        self.min_y, self.max_y = min(y for _, y in self.xy), max(y for _, y in self.xy)
+
+
+@functools.lru_cache(maxsize=1024)
+def _cached_plane(points: tuple[tuple[float, float], ...]) -> _Plane:
+    return _Plane(points)
+
+
+def _plane_of(zone: dict[str, Any]) -> _Plane:
+    """The polygon's plane, cached on its corners: a tracker update checks every box."""
+    return _cached_plane(tuple((lat, lon) for lat, lon in zone["points"]))
 
 
 def _dist_to_segment(px: float, py: float, a: Xy, b: Xy) -> float:
@@ -221,8 +243,12 @@ def _ring_contains(xy: list[Xy], px: float, py: float) -> bool:
 
 
 def _polygon_contains(zone: dict[str, Any], lat: float, lon: float) -> bool:
-    ref_lat, ref_lon, m_lon, xy = _plane(zone["points"])
-    px, py = (lon - ref_lon) * m_lon, (lat - ref_lat) * M_PER_DEG
+    pl = _plane_of(zone)
+    px, py = (lon - pl.ref_lon) * pl.m_lon, (lat - pl.ref_lat) * M_PER_DEG
+    if not (pl.min_x - EDGE_MARGIN_M <= px <= pl.max_x + EDGE_MARGIN_M
+            and pl.min_y - EDGE_MARGIN_M <= py <= pl.max_y + EDGE_MARGIN_M):
+        return False
+    xy = pl.xy
     n = len(xy)
     if any(_dist_to_segment(px, py, xy[i], xy[(i + 1) % n]) <= EDGE_MARGIN_M for i in range(n)):
         return True
@@ -236,7 +262,7 @@ def _signed_area(xy: list[Xy]) -> float:
 
 
 def _polygon_area(zone: dict[str, Any]) -> float:
-    return abs(_signed_area(_plane(zone["points"])[3]))
+    return abs(_signed_area(_plane_of(zone).xy))
 
 
 def _polygon_label_xy(xy: list[Xy]) -> Xy:
@@ -264,9 +290,9 @@ def _polygon_label_xy(xy: list[Xy]) -> Xy:
 
 
 def _polygon_label_point(zone: dict[str, Any]) -> tuple[float, float]:
-    ref_lat, ref_lon, m_lon, xy = _plane(zone["points"])
-    x, y = _polygon_label_xy(xy)
-    return (ref_lat + y / M_PER_DEG, ref_lon + x / m_lon)
+    pl = _plane_of(zone)
+    x, y = _polygon_label_xy(pl.xy)
+    return (pl.ref_lat + y / M_PER_DEG, pl.ref_lon + x / pl.m_lon)
 
 
 def _orient(a: Xy, b: Xy, c: Xy) -> float:

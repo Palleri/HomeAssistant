@@ -124,6 +124,15 @@ def test_polygon_points_on_a_side_or_corner_are_inside():
         assert contains(ELL, *a), f"corner {i}"
 
 
+def test_polygon_outside_its_bounding_box_and_after_a_change():
+    assert not contains(ELL, *at(-1, 30)) and not contains(ELL, *at(30, 61))
+    # The plane is cached on the corners, so a changed outline is never answered from an old one.
+    moved = {**ELL, "points": [[lat + 100 * M_LAT, lon] for lat, lon in ELL["points"]]}
+    assert contains(ELL, *at(10, 30)) and not contains(moved, *at(10, 5))
+    assert contains(moved, *at(10, 105))
+    assert area_m2(moved) == pytest.approx(1200, rel=1e-4)
+
+
 def test_polygon_area_and_radius():
     assert area_m2(SQUARE) == pytest.approx(1600, rel=1e-4)
     assert area_m2(ELL) == pytest.approx(1200, rel=1e-4)
