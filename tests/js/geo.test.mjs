@@ -40,22 +40,67 @@ test("smallest box wins, like the entities", () => {
   assert.equal(G.findZone([big, small], BOX.lat, BOX.lon).id, "small");
 });
 
-test("JS and Python agree on inside/outside", () => {
+test("JS and Python agree on inside/outside, area and label point", () => {
   const pts = [];
   for (let i = 0; i < 400; i++) {
     const p = G.localToGeo(BOX, (Math.random() - 0.5) * 140, (Math.random() - 0.5) * 70);
     pts.push([p.lat, p.lon]);
   }
+  const boxes = [BOX, { ...BOX, shape: "rectangle", width_m: 7.5, height_m: 1234.25 }];
   const py = process.env.PYTHON || "python3";
   const out = execFileSync(py, ["-c", `
 import json, sys
 sys.path.insert(0, "custom_components/box_zones")
-from geometry import contains
-box, pts = json.load(sys.stdin)
-print(json.dumps([contains(box, lat, lon) for lat, lon in pts]))
-`], { input: JSON.stringify([BOX, pts]) });
+from geometry import area_m2, contains, label_point
+boxes, pts = json.load(sys.stdin)
+print(json.dumps([
+    {"inside": [contains(box, lat, lon) for lat, lon in pts], "area": area_m2(box), "label": label_point(box)}
+    for box in boxes
+]))
+`], { input: JSON.stringify([boxes, pts]) });
   const want = JSON.parse(out);
-  pts.forEach(([lat, lon], i) => assert.equal(G.contains(BOX, lat, lon), want[i], `point ${i}`));
+  boxes.forEach((box, b) => {
+    pts.forEach(([lat, lon], i) => assert.equal(G.contains(box, lat, lon), want[b].inside[i], `box ${b} point ${i}`));
+    close(G.areaM2(box), want[b].area);
+    const lp = G.labelPoint(box);
+    close(lp.lat, want[b].label[0], 1e-12); close(lp.lon, want[b].label[1], 1e-12);
+  });
+});
+
+test("a box without a shape is a rectangle", () => {
+  assert.equal(G.shapeOf(BOX), G.RECTANGLE);
+  assert.equal(G.shapeOf({ ...BOX, shape: "rectangle" }), "rectangle");
+});
+
+test("area and label point of a rectangle", () => {
+  assert.equal(G.areaM2(BOX), 4000);
+  assert.deepEqual(G.labelPoint(BOX), { lat: BOX.lat, lon: BOX.lon });
+  const lp = G.labelPoint(BOX);
+  assert.ok(G.contains(BOX, lp.lat, lp.lon));
+});
+
+test("smallest area wins whatever the proportions", () => {
+  const long = { ...BOX, id: "long", width_m: 1000, height_m: 3 }; // 3000 m²: wider but smaller
+  assert.equal(G.findZone([BOX, long], BOX.lat, BOX.lon).id, "long");
+});
+
+test("bounds span every box's outline and extra points", () => {
+  const b = G.bounds([BOX], [{ lat: BOX.lat + 1, lon: BOX.lon }]);
+  const [[s, w], [n, e]] = b;
+  const cs = G.corners(BOX);
+  close(s, Math.min(...cs.map((c) => c.lat)));
+  close(w, Math.min(...cs.map((c) => c.lon)));
+  close(e, Math.max(...cs.map((c) => c.lon)));
+  close(n, BOX.lat + 1);
+  const [[s2, w2], [n2, e2]] = G.bounds([BOX]);
+  for (const p of G.outline(BOX)) {
+    assert.ok(p.lat >= s2 - 1e-12 && p.lat <= n2 + 1e-12 && p.lon >= w2 - 1e-12 && p.lon <= e2 + 1e-12);
+  }
+  assert.equal(G.bounds([]), null);
+});
+
+test("an unknown shape is an error, not a silent miss", () => {
+  assert.throws(() => G.contains({ ...BOX, shape: "blob" }, BOX.lat, BOX.lon));
 });
 
 test("corners are half the size away from the centre", () => {

@@ -1,8 +1,14 @@
-"""Rotated rectangles on the map: validation and "is this point inside?".
+"""Boxes on the map: validation and "is this point inside?".
 
-A box is stored as its centre (lat, lon), its size in metres (width_m along
-its own x axis, height_m along its y axis) and a rotation in degrees,
-clockwise on a north-up map. Rotation 0 means the width runs east-west.
+Every box has a `shape`. Today the only shape is a rectangle; a stored box
+without `shape` is a rectangle. Callers use the shape-neutral functions
+(`contains`, `area_m2`, `label_point`, `equivalent_radius`, `find_zones`,
+`validate_zone`), which dispatch on the shape, so a new shape only adds its
+own functions to the tables at the bottom of this module.
+
+A rectangle is stored as its centre (lat, lon), its size in metres (width_m
+along its own x axis, height_m along its y axis) and a turn (rotation_deg) in
+degrees, clockwise on a north-up map. Turn 0 means the width runs east-west.
 
 The maths uses a flat local plane around each box's centre, which is exact
 enough for anything up to tens of kilometres. The same maths is in
@@ -25,6 +31,8 @@ NAME_MAX = 100
 # Points exactly on an edge count as inside.
 EDGE_MARGIN_M = 1e-6
 
+RECTANGLE = "rectangle"
+
 _ID_RE = re.compile(r"[-_.A-Za-z0-9]{1,64}")
 # Control, format (zero-width, bidi), line/paragraph separators, surrogates, private use, unassigned.
 _BAD_CATEGORIES = {"Cc", "Cf", "Zl", "Zp", "Cs", "Co", "Cn"}
@@ -38,23 +46,59 @@ class ZoneError(ValueError):
         self.field = field
 
 
+def shape_of(zone: dict[str, Any]) -> str:
+    """The box's shape; a box stored without one is a rectangle."""
+    return zone.get("shape") or RECTANGLE
+
+
 def to_local(zone: dict[str, Any], lat: float, lon: float) -> tuple[float, float]:
-    """Metres from the box centre along the box's own width (x) and height (y) axes."""
+    """Metres from a rectangle's centre along its own width (x) and height (y) axes."""
     east = (lon - zone["lon"]) * M_PER_DEG * math.cos(math.radians(zone["lat"]))
     north = (lat - zone["lat"]) * M_PER_DEG
     a = math.radians(zone["rotation_deg"])
     return (east * math.cos(a) - north * math.sin(a), east * math.sin(a) + north * math.cos(a))
 
 
-def contains(zone: dict[str, Any], lat: float, lon: float) -> bool:
+def _rectangle_contains(zone: dict[str, Any], lat: float, lon: float) -> bool:
     x, y = to_local(zone, lat, lon)
     return (abs(x) <= zone["width_m"] / 2 + EDGE_MARGIN_M
             and abs(y) <= zone["height_m"] / 2 + EDGE_MARGIN_M)
 
 
+def _rectangle_area(zone: dict[str, Any]) -> float:
+    return zone["width_m"] * zone["height_m"]
+
+
+def _rectangle_label_point(zone: dict[str, Any]) -> tuple[float, float]:
+    return (zone["lat"], zone["lon"])
+
+
+def _shape_fn(table: dict[str, Any], zone: dict[str, Any]) -> Any:
+    shape = shape_of(zone)
+    try:
+        return table[shape]
+    except KeyError:
+        raise ZoneError(f"Unknown shape: {shape}", "shape") from None
+
+
+def contains(zone: dict[str, Any], lat: float, lon: float) -> bool:
+    """Is the point inside the box? Points on an edge count as inside."""
+    return _shape_fn(_CONTAINS, zone)(zone, lat, lon)
+
+
+def area_m2(zone: dict[str, Any]) -> float:
+    """The box's area in square metres."""
+    return _shape_fn(_AREA, zone)(zone)
+
+
+def label_point(zone: dict[str, Any]) -> tuple[float, float]:
+    """(lat, lon) of a point inside the box where its name goes: the middle of a rectangle."""
+    return _shape_fn(_LABEL_POINT, zone)(zone)
+
+
 def find_zones(zones: list[dict[str, Any]], lat: float, lon: float) -> list[dict[str, Any]]:
-    """Every box the point is in, smallest first."""
-    return sorted((z for z in zones if contains(z, lat, lon)), key=lambda z: z["width_m"] * z["height_m"])
+    """Every box the point is in, smallest area first."""
+    return sorted((z for z in zones if contains(z, lat, lon)), key=area_m2)
 
 
 def find_zone(zones: list[dict[str, Any]], lat: float, lon: float) -> dict[str, Any] | None:
@@ -65,7 +109,7 @@ def find_zone(zones: list[dict[str, Any]], lat: float, lon: float) -> dict[str, 
 
 def equivalent_radius(zone: dict[str, Any]) -> float:
     """The radius of a circle with the box's area, to compare a box with round zones."""
-    return math.sqrt(zone["width_m"] * zone["height_m"] / math.pi)
+    return math.sqrt(area_m2(zone) / math.pi)
 
 
 def _number(value: Any, field: str) -> float:
@@ -87,12 +131,23 @@ def clean_name(name: Any) -> str:
 
 
 def validate_zone(obj: Any) -> dict[str, Any]:
-    """Return a clean copy of the box, or raise ZoneError. A missing id gets a new one."""
+    """Return a clean copy of the box, or raise ZoneError. A missing id gets a new one.
+
+    Used on load and on save. A box without `shape` is a rectangle.
+    """
     if not isinstance(obj, dict):
         raise ZoneError("A box must be an object")
     zone_id = obj.get("id") or uuid.uuid4().hex
     if not isinstance(zone_id, str) or not _ID_RE.fullmatch(zone_id):
         raise ZoneError("Invalid box id", "id")
+    shape = obj.get("shape") or RECTANGLE
+    validate_shape = _VALIDATE.get(shape) if isinstance(shape, str) else None
+    if validate_shape is None:
+        raise ZoneError("Unknown shape", "shape")
+    return {"id": zone_id, "name": clean_name(obj.get("name")), "shape": shape, **validate_shape(obj)}
+
+
+def _validate_rectangle(obj: dict[str, Any]) -> dict[str, Any]:
     lat = _number(obj.get("lat"), "lat")
     lon = _number(obj.get("lon"), "lon")
     width = _number(obj.get("width_m"), "width_m")
@@ -106,11 +161,16 @@ def validate_zone(obj: Any) -> dict[str, Any]:
         if not MIN_SIZE_M <= value <= MAX_SIZE_M:
             raise ZoneError(f"Width and height must be {MIN_SIZE_M:g} to {MAX_SIZE_M:g} m", field)
     return {
-        "id": zone_id,
-        "name": clean_name(obj.get("name")),
         "lat": lat,
         "lon": lon,
         "width_m": round(width, 2),
         "height_m": round(height, 2),
         "rotation_deg": round(rotation, 2) % 360.0,
     }
+
+
+# Per-shape functions. A new shape adds an entry to each table.
+_CONTAINS = {RECTANGLE: _rectangle_contains}
+_AREA = {RECTANGLE: _rectangle_area}
+_LABEL_POINT = {RECTANGLE: _rectangle_label_point}
+_VALIDATE = {RECTANGLE: _validate_rectangle}

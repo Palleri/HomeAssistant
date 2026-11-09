@@ -10,7 +10,9 @@ CONF_ENTITY_ID = "entity_id"
 SUBENTRY_TRACKER = "tracker"
 
 STORAGE_KEY = "box_zones.zones"
-STORAGE_VERSION = 1
+# Major version 2: boxes have a shape (ADR 0001). Older Box Zones refuse to load it
+# instead of dropping boxes they don't understand.
+STORAGE_VERSION = 2
 
 PANEL_URL_PATH = "box-zones"
 PANEL_TITLE = "Box Zones"

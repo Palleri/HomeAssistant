@@ -274,6 +274,11 @@ async def test_box_entity(hass: HomeAssistant, hass_ws_client) -> None:
     assert box.state == "0"
     assert box.attributes["box_id"] == zone_id
     assert box.attributes["radius"] > 0
+    assert box.attributes["shape"] == "rectangle"
+    assert box.attributes["area_m2"] == 4000  # 100 m × 40 m
+    assert {k: box.attributes[k] for k in ("width_m", "height_m", "rotation_deg")} == {
+        "width_m": 100, "height_m": 40, "rotation_deg": 0}
+    assert (box.attributes["center_latitude"], box.attributes["center_longitude"]) == (BOX["lat"], BOX["lon"])
 
     car_at(hass, 52.5163, 13.3777)
     await hass.async_block_till_done()
@@ -334,3 +339,35 @@ async def test_zone_condition_still_sees_home_inside_a_box(hass: HomeAssistant, 
     )
     check = await condition.async_from_config(hass, config)
     assert check(hass)
+
+
+async def test_saved_boxes_are_storage_version_2(hass: HomeAssistant, hass_ws_client, hass_storage) -> None:
+    await setup(hass)
+    client = await hass_ws_client(hass)
+    await add_box(hass, client)
+    stored = hass_storage["box_zones.zones"]
+    assert stored["version"] == 2
+    assert stored["data"]["zones"][0]["shape"] == "rectangle"
+
+
+async def test_version_1_boxes_load_as_rectangles(hass: HomeAssistant, hass_ws_client, hass_storage) -> None:
+    """Boxes saved by 0.3.x (storage version 1, no shape) load unchanged; the next save writes version 2."""
+    old = {"id": "abc", **BOX, "width_m": 20.5, "rotation_deg": 12.25}
+    hass_storage["box_zones.zones"] = {"version": 1, "minor_version": 1, "key": "box_zones.zones",
+                                       "data": {"zones": [old]}}
+    car_at(hass, 52.5163, 13.3777)
+    await setup(hass)
+    assert hass.states.get(OURS).state == "Parking"
+    box = hass.states.get(BOX_SENSOR)
+    assert box.attributes["shape"] == "rectangle"
+    assert box.attributes["area_m2"] == 820
+    assert box.attributes["rotation_deg"] == 12.25
+
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id({"type": "box_zones/get"})
+    assert (await client.receive_json())["result"]["zones"] == [{**old, "shape": "rectangle"}]
+
+    await add_box(hass, client, name="Other")
+    stored = hass_storage["box_zones.zones"]
+    assert stored["version"] == 2
+    assert stored["data"]["zones"][0] == {**old, "shape": "rectangle"}

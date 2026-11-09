@@ -495,7 +495,7 @@ class BoxZonesPanel extends HTMLElement {
     const names = new Set(this._zones.map((z) => z.name));
     let n = this._zones.length + 1;
     while (names.has(`Box ${n}`)) n++;
-    const draft = { id: G.newId(), name: `Box ${n}`, lat: c.lat, lon: c.lng, width_m: width, height_m: G.niceMetres(width * 0.6), rotation_deg: 0 };
+    const draft = { id: G.newId(), name: `Box ${n}`, shape: G.RECTANGLE, lat: c.lat, lon: c.lng, width_m: width, height_m: G.niceMetres(width * 0.6), rotation_deg: 0 };
     this._mode = { view: "edit", draft, isNew: true };
     this._error = "";
     this._render();
@@ -514,7 +514,7 @@ class BoxZonesPanel extends HTMLElement {
     this._render();
     this._syncMap();
     // Show the original and the copy together.
-    const bounds = this._L.latLngBounds([...G.corners(d), ...G.corners(draft)].map((c) => [c.lat, c.lon]));
+    const bounds = this._L.latLngBounds(G.bounds([d, draft]));
     if (!this._map.getBounds().pad(-0.05).contains(bounds)) this._map.fitBounds(bounds, { padding: [70, 70], maxZoom: 22 });
   }
 
@@ -526,7 +526,7 @@ class BoxZonesPanel extends HTMLElement {
     this._render();
     this._syncMap();
     // Zoom so the box is big enough to grab its handles (and fully visible).
-    const bounds = this._L.latLngBounds(G.corners(z).map((p) => [p.lat, p.lon]));
+    const bounds = this._L.latLngBounds(G.bounds([z]));
     const map = this._map;
     const a = map.latLngToContainerPoint(bounds.getNorthWest());
     const b = map.latLngToContainerPoint(bounds.getSouthEast());
@@ -615,15 +615,15 @@ class BoxZonesPanel extends HTMLElement {
 
   _fitAll() {
     if (!this._map || !G || this._fitted) return;
-    const pts = [];
-    for (const z of this._zones) for (const p of G.corners(z)) pts.push([p.lat, p.lon]);
-    for (const t of this._trackers) { const i = this._trackerInfo(t); if (i.pos) pts.push(i.pos); }
-    if (!pts.length) return;
+    const extra = [];
+    for (const t of this._trackers) { const i = this._trackerInfo(t); if (i.pos) extra.push({ lat: i.pos[0], lon: i.pos[1] }); }
+    const fit = G.bounds(this._zones, extra);
+    if (!fit) return;
     this._fitted = true;
     // Wait for the layout (the phone layout splits the screen), then fit.
     requestAnimationFrame(() => {
       this._map.invalidateSize();
-      this._map.fitBounds(this._L.latLngBounds(pts), { padding: [40, 40], maxZoom: 18 });
+      this._map.fitBounds(this._L.latLngBounds(fit), { padding: [40, 40], maxZoom: 18 });
     });
   }
 
@@ -645,17 +645,18 @@ class BoxZonesPanel extends HTMLElement {
         fillOpacity: isEdit ? 0.25 : editing ? 0.08 : 0.18, opacity: editing && !isEdit ? 0.5 : 1,
       };
       const pts = G.outline(z).map((p) => [p.lat, p.lon]);
+      const lp = G.labelPoint(z), labelAt = [lp.lat, lp.lon];
       let l = this._zoneLayers.get(z.id);
       if (!l) {
         const poly = L.polygon(pts, style).addTo(this._map);
         poly.on("click", (e) => { L.DomEvent.stopPropagation(e); this._edit(z.id); });
         const label = L.tooltip({ permanent: true, direction: "center", className: "zb-label", interactive: false })
-          .setLatLng([z.lat, z.lon]).setContent(document.createTextNode(z.name || " ")).addTo(this._map);
+          .setLatLng(labelAt).setContent(document.createTextNode(z.name || " ")).addTo(this._map);
         l = { poly, label, name: z.name };
         this._zoneLayers.set(z.id, l);
       } else {
         l.poly.setLatLngs(pts);
-        l.label.setLatLng([z.lat, z.lon]);
+        l.label.setLatLng(labelAt);
       }
       l.poly.setStyle(style);
       if (l.name !== z.name) {

@@ -1,13 +1,19 @@
 /* Box Zones geometry. Pure functions, no DOM; the same maths as geometry.py.
  *
- * A box: {lat, lon, width_m, height_m, rotation_deg}. Local frame: x along the
- * width, y along the height, metres from the centre. Rotation is clockwise on a
- * north-up map; 0 means the width runs east-west.
+ * Every box has a `shape`; today only "rectangle" (a box without `shape` is a
+ * rectangle). Callers use the shape-neutral functions (contains, areaM2,
+ * labelPoint, outline, boundsPoints, bounds, findZone), which dispatch on the
+ * shape, so a new shape only adds its own entry to SHAPES below.
+ *
+ * A rectangle: {lat, lon, width_m, height_m, rotation_deg}. Local frame: x along
+ * the width, y along the height, metres from the centre. The turn (rotation_deg)
+ * is clockwise on a north-up map; 0 means the width runs east-west.
  */
 export const M_PER_DEG = 111320;
 export const MIN_SIZE_M = 2;
 export const MAX_SIZE_M = 50000;
 const EDGE_MARGIN_M = 1e-6;
+export const RECTANGLE = "rectangle";
 
 const rad = (a) => (a * Math.PI) / 180;
 const deg = (a) => (a * 180) / Math.PI;
@@ -32,28 +38,23 @@ export function geoToLocal(z, lat, lon) {
   return { x: e * Math.cos(a) - n * Math.sin(a), y: e * Math.sin(a) + n * Math.cos(a) };
 }
 
-/** The four corners: top-left, top-right, bottom-right, bottom-left (in the box's own frame). */
+/** The box's shape; a box without one is a rectangle. */
+export function shapeOf(z) {
+  return z.shape || RECTANGLE;
+}
+
+/** A rectangle's four corners: top-left, top-right, bottom-right, bottom-left (in its own frame). */
 export function corners(z) {
   const w = z.width_m / 2, h = z.height_m / 2;
   return [localToGeo(z, -w, h), localToGeo(z, w, h), localToGeo(z, w, -h), localToGeo(z, -w, -h)];
 }
 
-export function contains(z, lat, lon) {
+function rectContains(z, lat, lon) {
   const p = geoToLocal(z, lat, lon);
   return Math.abs(p.x) <= z.width_m / 2 + EDGE_MARGIN_M && Math.abs(p.y) <= z.height_m / 2 + EDGE_MARGIN_M;
 }
 
-/** The box a point is in; when boxes overlap the smallest wins (like the entities). */
-export function findZone(zones, lat, lon) {
-  let best = null;
-  for (const z of zones) {
-    if (contains(z, lat, lon) && (!best || z.width_m * z.height_m < best.width_m * best.height_m)) best = z;
-  }
-  return best;
-}
-
-/** Outline with `perEdge` points per side, so big boxes follow the straight local-plane edges. */
-export function outline(z, perEdge = 8) {
+function rectOutline(z, perEdge) {
   const w = z.width_m / 2, h = z.height_m / 2;
   const cs = [[-w, h], [w, h], [w, -h], [-w, -h]];
   const pts = [];
@@ -65,6 +66,68 @@ export function outline(z, perEdge = 8) {
     }
   }
   return pts;
+}
+
+/** Per-shape maths. A new shape adds an entry with the same functions. */
+const SHAPES = {
+  [RECTANGLE]: {
+    contains: rectContains,
+    area: (z) => z.width_m * z.height_m,
+    labelPoint: (z) => ({ lat: z.lat, lon: z.lon }),
+    outline: rectOutline,
+    boundsPoints: corners,
+  },
+};
+
+function shapeFns(z) {
+  const fns = SHAPES[shapeOf(z)];
+  if (!fns) throw new Error(`Unknown shape: ${shapeOf(z)}`);
+  return fns;
+}
+
+/** Is the point inside the box? Points on an edge count as inside. */
+export function contains(z, lat, lon) {
+  return shapeFns(z).contains(z, lat, lon);
+}
+
+/** The box's area in square metres (the same number as the entity's area_m2). */
+export function areaM2(z) {
+  return shapeFns(z).area(z);
+}
+
+/** A point inside the box where its name goes: the middle of a rectangle. */
+export function labelPoint(z) {
+  return shapeFns(z).labelPoint(z);
+}
+
+/** The drawable ring, with `perEdge` points per side so long sides follow the straight local-plane line. */
+export function outline(z, perEdge = 8) {
+  return shapeFns(z).outline(z, perEdge);
+}
+
+/** Points that span the box, for fitting the map to it. */
+export function boundsPoints(z) {
+  return shapeFns(z).boundsPoints(z);
+}
+
+/** [[south, west], [north, east]] around all the boxes (and any extra {lat, lon} points), or null if empty. */
+export function bounds(zones, extra = []) {
+  let s = Infinity, w = Infinity, n = -Infinity, e = -Infinity;
+  const add = (p) => { s = Math.min(s, p.lat); n = Math.max(n, p.lat); w = Math.min(w, p.lon); e = Math.max(e, p.lon); };
+  for (const z of zones) boundsPoints(z).forEach(add);
+  extra.forEach(add);
+  return s === Infinity ? null : [[s, w], [n, e]];
+}
+
+/** The box a point is in; when boxes overlap the smallest area wins (like the entities). */
+export function findZone(zones, lat, lon) {
+  let best = null, bestArea = Infinity;
+  for (const z of zones) {
+    if (!contains(z, lat, lon)) continue;
+    const a = areaM2(z);
+    if (a < bestArea) { best = z; bestArea = a; }
+  }
+  return best;
 }
 
 /** Where each resize handle sits, as signs of the half width/height. */
