@@ -2,12 +2,14 @@
 
 # Box Zones
 
-**Rectangular zones for Home Assistant.** Draw boxes on a map, turn them to any
-angle, and see which box your car or phone is in.
+**Rectangle and polygon zones for Home Assistant.** Draw boxes on a map, as
+rectangles you can turn to any angle or as polygons that follow any outline,
+and see which box your car or phone is in.
 
 Home Assistant's own zones are always circles. A circle is a bad fit for a
 parking spot, a driveway or one side of a street. Box Zones lets you draw a box
-instead.
+instead: a **rectangle** for a parking spot, or a **polygon** for an L-shaped
+driveway or a plot with a slanted boundary.
 
 ## Install
 
@@ -17,9 +19,11 @@ instead.
 2. **Set it up:**
    [![Add integration](https://my.home-assistant.io/badges/config_flow_start.svg)](https://my.home-assistant.io/redirect/config_flow_start/?domain=box_zones)
    Pick the trackers to follow, for example your car.
-3. **Draw a box:** open **Box Zones** in the sidebar, press **New box**, give
-   it a name and press **Save**. Drag inside the box to move it, the corners
-   and side dots to resize it, and its edge to turn it.
+3. **Draw a box:** open **Box Zones** in the sidebar and press **Add rectangle**
+   or **Add polygon**. For a rectangle, drag inside it to move it, the corners
+   and side dots to resize it, and its edge to turn it. For a polygon, tap the
+   map at each corner (see [Drawing a polygon](#drawing-a-polygon)). Give the
+   box a name and press **Save**.
 
 That's it.
 
@@ -33,6 +37,31 @@ That's it.
   `/config/custom_components/box_zones` and restart.
 
 </details>
+
+## Drawing a polygon
+
+Press **Add polygon** and tap the map once for each corner, going round the
+place in order. The outline grows as you tap. You can still pan and zoom while
+drawing: a tap that moves the map places no corner.
+
+- **Close the outline** by tapping the first corner again, or press **Done**.
+- **Undo** removes the last corner; **Cancel** (or Escape) throws the polygon
+  away.
+- **Save** works once the outline is closed with at least 3 corners.
+
+To change a saved polygon, tap it on the map or in the list:
+
+- drag a corner to move it;
+- drag the dot in the middle of a side to add a corner there;
+- tap a corner and press **Remove corner**, or right-click it, to remove it
+  (a polygon keeps at least 3 corners);
+- drag inside the polygon, or on a side, to move the whole polygon.
+
+A polygon may be concave (an L or U shape) but its outline must not cross
+itself: a crossing outline turns red and dashed, the page says "The outline
+crosses itself", and **Save** stays off until you fix it. A polygon has 3 to
+100 corners, and like a rectangle it must be at least 4 m² and at most 50 km
+across; an outline that breaks one of these rules is shown the same way.
 
 ## What you get
 
@@ -51,9 +80,17 @@ The entity shows:
 It works anywhere a tracker works: maps, history, and you can even add it to a
 **person**.
 
-Every box also gets its own entity, for example `sensor.box_zones_parking`.
+Every box also gets its own box entity, for example `sensor.box_zones_parking`.
 Its state is how many followed trackers are inside the box, and the
-`trackers` attribute names them.
+`trackers` attribute names them. Other attributes:
+
+| Attribute | Meaning |
+|---|---|
+| `shape` | `rectangle` or `polygon` |
+| `area_m2` | the box's area in square metres |
+| `center_latitude`, `center_longitude` | a point inside the box (where its name is shown on the map) |
+| `width_m`, `height_m`, `rotation_deg` | rectangles only: size and turn |
+| `points` | polygons only: the corners as `[latitude, longitude]` pairs (not stored in history) |
 
 ## Use it in an automation
 
@@ -80,8 +117,11 @@ To trigger when the car leaves, use `from: Parking` instead.
   "Neighbourhood" box around your home shows "Home" when you're home.
 - **Zone conditions keep working:** "car is in Home" is still true while the
   car is in a box inside your Home zone.
-- **Duplicate:** open a box and press **Duplicate** to get a copy of the same
-  size and turn right next to it (handy for a row of parking spots).
+- **Duplicate:** open a rectangle and press **Duplicate** to get a copy of the
+  same size and turn right next to it (handy for a row of parking spots).
+- **Rectangle only:** Duplicate, turning and the exact size fields are for
+  rectangles. A box keeps the shape it was made with; to change shape, draw a
+  new box.
 - **Same name, more boxes:** several boxes can share one name, for example two
   spots that both count as `Parking`.
 - **More trackers:** one Box Zones follows as many trackers as you like. Add
@@ -94,6 +134,9 @@ To trigger when the car leaves, use `from: Parking` instead.
 - The Box Zones page is for admins only.
 - Your boxes are stored in `/config/.storage/box_zones.zones` and are part of
   normal Home Assistant backups.
+- **Going back to 0.3.x:** once 0.4.0 has saved your boxes, the file is in
+  a newer format. If you then go back to 0.3.x, Box Zones refuses to load
+  instead of dropping your polygons. Upgrading again brings all boxes back.
 
 ## Development
 

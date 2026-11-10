@@ -18,7 +18,7 @@ from homeassistant.util import slugify
 
 from . import BoxZonesConfigEntry
 from .const import DOMAIN, SIGNAL_BOX_ENTITIES_UPDATED, SIGNAL_POSITIONS_UPDATED, SIGNAL_ZONES_UPDATED
-from .geometry import contains, equivalent_radius
+from .geometry import POLYGON, RECTANGLE, area_m2, contains, equivalent_radius, label_point, shape_of
 from .store import ZoneStore
 
 UNIQUE_PREFIX = "box_"
@@ -69,6 +69,8 @@ async def async_setup_entry(
 class BoxZoneSensor(SensorEntity):
     _attr_should_poll = False
     _attr_icon = "mdi:vector-square"
+    # A polygon's corners can be long; keep them out of the history database.
+    _unrecorded_attributes = frozenset({"points"})
 
     def __init__(self, store: ZoneStore, zone: dict[str, Any]) -> None:
         self._store = store
@@ -118,15 +120,18 @@ class BoxZoneSensor(SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         z = self._zone
-        return {
+        lat, lon = label_point(z)
+        attrs: dict[str, Any] = {
             # Home Assistant compares a box with round zones by this radius (same area).
             "radius": round(equivalent_radius(z), 2),
             "passive": False,
             "box_id": z["id"],
-            "width_m": z["width_m"],
-            "height_m": z["height_m"],
-            "rotation_deg": z["rotation_deg"],
-            "center_latitude": z["lat"],
-            "center_longitude": z["lon"],
-            "trackers": self._inside(),
+            "shape": shape_of(z),
+            "area_m2": round(area_m2(z), 2),
         }
+        if shape_of(z) == RECTANGLE:
+            attrs.update(width_m=z["width_m"], height_m=z["height_m"], rotation_deg=z["rotation_deg"])
+        elif shape_of(z) == POLYGON:
+            attrs["points"] = [list(p) for p in z["points"]]
+        attrs.update(center_latitude=lat, center_longitude=lon, trackers=self._inside())
+        return attrs

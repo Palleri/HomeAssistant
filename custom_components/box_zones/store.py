@@ -12,12 +12,28 @@ from .const import SIGNAL_ZONES_UPDATED, STORAGE_KEY, STORAGE_VERSION
 from .geometry import MAX_ZONES, ZoneError, validate_zone
 
 
+class _BoxStore(Store[dict[str, Any]]):
+    """The storage file, with migrations from older major versions."""
+
+    async def _async_migrate_func(
+        self, old_major_version: int, old_minor_version: int, old_data: dict[str, Any]
+    ) -> dict[str, Any]:
+        # 1 -> 2: the data stays as it is; a box without `shape` is a rectangle.
+        # The major bump only stops older Box Zones from loading boxes they can't read.
+        if old_major_version == 1:
+            return old_data
+        # Saved by a newer Box Zones (a higher major version): Home Assistant re-raises
+        # this, so setup fails and the file is left untouched (ADR 0001). A newer minor
+        # version of our own major version still loads as it is.
+        raise NotImplementedError
+
+
 class ZoneStore:
     """Loads, changes and saves the box list and tells the entities about changes."""
 
     def __init__(self, hass: HomeAssistant) -> None:
         self.hass = hass
-        self._store: Store[dict[str, Any]] = Store(hass, STORAGE_VERSION, STORAGE_KEY)
+        self._store: Store[dict[str, Any]] = _BoxStore(hass, STORAGE_VERSION, STORAGE_KEY)
         self.zones: list[dict[str, Any]] = []
         # The trackers the entities were created for (see __init__._async_reload).
         self.loaded_trackers: list[str] = []

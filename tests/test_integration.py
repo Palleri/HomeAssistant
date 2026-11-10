@@ -274,6 +274,11 @@ async def test_box_entity(hass: HomeAssistant, hass_ws_client) -> None:
     assert box.state == "0"
     assert box.attributes["box_id"] == zone_id
     assert box.attributes["radius"] > 0
+    assert box.attributes["shape"] == "rectangle"
+    assert box.attributes["area_m2"] == 4000  # 100 m × 40 m
+    assert {k: box.attributes[k] for k in ("width_m", "height_m", "rotation_deg")} == {
+        "width_m": 100, "height_m": 40, "rotation_deg": 0}
+    assert (box.attributes["center_latitude"], box.attributes["center_longitude"]) == (BOX["lat"], BOX["lon"])
 
     car_at(hass, 52.5163, 13.3777)
     await hass.async_block_till_done()
@@ -334,3 +339,212 @@ async def test_zone_condition_still_sees_home_inside_a_box(hass: HomeAssistant, 
     )
     check = await condition.async_from_config(hass, config)
     assert check(hass)
+
+
+async def test_saved_boxes_are_storage_version_2(hass: HomeAssistant, hass_ws_client, hass_storage) -> None:
+    await setup(hass)
+    client = await hass_ws_client(hass)
+    await add_box(hass, client)
+    stored = hass_storage["box_zones.zones"]
+    assert stored["version"] == 2
+    assert stored["data"]["zones"][0]["shape"] == "rectangle"
+
+
+import math  # noqa: E402
+
+M_LAT = 1 / 111_320
+
+
+def at(origin: tuple[float, float], x: float, y: float) -> list[float]:
+    """[lat, lon] x metres east and y metres north of origin."""
+    return [origin[0] + y * M_LAT, origin[1] + x * M_LAT / math.cos(math.radians(origin[0]))]
+
+
+def ell(origin: tuple[float, float], size: float, name: str = "Garden") -> dict:
+    """An L: size × size with the north-east quarter (the notch) cut out; origin is its south-west corner."""
+    s, h = size, size / 2
+    return {"name": name, "shape": "polygon",
+            "points": [at(origin, x, y) for x, y in ((0, 0), (s, 0), (s, h), (h, h), (h, s), (0, s))]}
+
+
+async def save(client, zone: dict) -> dict:
+    await client.send_json_auto_id({"type": "box_zones/save_zone", "zone": zone})
+    return await client.receive_json()
+
+
+GARDEN = "sensor.box_zones_garden"
+
+
+async def test_concave_polygon_counts_trackers_inside_not_in_its_notch(hass: HomeAssistant, hass_ws_client) -> None:
+    origin = (52.5163, 13.3777)
+    car_at(hass, *at(origin, 10, 30))  # in the upright of the L
+    await setup(hass)
+    client = await hass_ws_client(hass)
+    msg = await save(client, ell(origin, 40))
+    assert msg["success"], msg
+    assert msg["result"]["zone"]["shape"] == "polygon"
+    await hass.async_block_till_done()
+    assert hass.states.get(OURS).state == "Garden"
+    assert hass.states.get(GARDEN).state == "1"
+    if SUPPORTS_IN_ZONES:
+        assert hass.states.get(OURS).attributes["in_zones"] == [GARDEN]
+
+    car_at(hass, *at(origin, 30, 30))  # in the notch
+    await hass.async_block_till_done()
+    assert hass.states.get(OURS).state == "not_home"
+    assert hass.states.get(GARDEN).state == "0"
+
+    car_at(hass, *at(origin, 30, 10))  # in the foot
+    await hass.async_block_till_done()
+    assert hass.states.get(OURS).state == "Garden"
+
+
+async def test_polygon_box_entity_attributes(hass: HomeAssistant, hass_ws_client) -> None:
+    from custom_components.box_zones.geometry import contains
+
+    origin = (52.5163, 13.3777)
+    car_at(hass, *at(origin, 10, 10))
+    await setup(hass)
+    client = await hass_ws_client(hass)
+    zone = ell(origin, 40)
+    msg = await save(client, zone)
+    assert msg["success"], msg
+    saved = msg["result"]["zone"]
+    await hass.async_block_till_done()
+    box = hass.states.get(GARDEN)
+    assert box.name == "Garden"
+    assert box.state == "1" and box.attributes["trackers"] == ["Car"]
+    attrs = box.attributes
+    assert attrs["shape"] == "polygon"
+    assert attrs["area_m2"] == pytest.approx(1200, rel=1e-3)
+    assert attrs["radius"] == pytest.approx(math.sqrt(attrs["area_m2"] / math.pi), abs=0.01)
+    assert attrs["box_id"] == saved["id"]
+    assert attrs["points"] == saved["points"] == [[round(c, 7) for c in p] for p in zone["points"]]
+    assert not {"width_m", "height_m", "rotation_deg"} & set(attrs)
+    assert contains(saved, attrs["center_latitude"], attrs["center_longitude"])
+    assert attrs["passive"] is False
+    # The corners are kept out of the history database.
+    assert "points" in box.state_info["unrecorded_attributes"]
+    # Rectangles keep their own attributes and have no points.
+    await add_box(hass, client)
+    assert "points" not in hass.states.get(BOX_SENSOR).attributes
+
+    # The page learns the polygon limits.
+    await client.send_json_auto_id({"type": "box_zones/get"})
+    limits = (await client.receive_json())["result"]["limits"]
+    assert limits["max_corners"] == 100 and limits["min_area_m2"] == 4
+
+
+async def test_smallest_area_wins_between_polygon_and_rectangle(hass: HomeAssistant, hass_ws_client) -> None:
+    # BOX is a 100 m × 40 m rectangle (4000 m²) around its centre.
+    centre = (BOX["lat"], BOX["lon"])
+    car_at(hass, *at(centre, 5, 5))
+    await setup(hass)
+    client = await hass_ws_client(hass)
+    await add_box(hass, client)
+    small = await save(client, ell(at(centre, -10, -10), 40, name="Garden"))  # 1200 m²
+    assert small["success"], small
+    await hass.async_block_till_done()
+    assert hass.states.get(OURS).state == "Garden"
+
+    await client.send_json_auto_id({"type": "box_zones/delete_zone", "zone_id": small["result"]["zone"]["id"]})
+    assert (await client.receive_json())["success"]
+    big = await save(client, ell(at(centre, -100, -100), 300, name="Plot"))  # 67 500 m²
+    assert big["success"], big
+    await hass.async_block_till_done()
+    state = hass.states.get(OURS)
+    assert state.state == "Parking"
+    if SUPPORTS_IN_ZONES:
+        assert state.attributes["in_zones"] == [BOX_SENSOR, "sensor.box_zones_plot"]
+
+
+async def test_smallest_area_wins_between_polygon_and_round_zone(hass: HomeAssistant, hass_ws_client) -> None:
+    """Home has a 100 m radius (about 31 400 m²)."""
+    car_at(hass, *HOME)
+    await setup(hass)
+    client = await hass_ws_client(hass)
+    small = await save(client, ell(at(HOME, -10, -10), 40, name="Driveway"))
+    assert small["success"], small
+    await hass.async_block_till_done()
+    assert hass.states.get(OURS).state == "Driveway"
+
+    await client.send_json_auto_id({"type": "box_zones/delete_zone", "zone_id": small["result"]["zone"]["id"]})
+    assert (await client.receive_json())["success"]
+    big = await save(client, ell(at(HOME, -300, -300), 1000, name="Neighbourhood"))  # 750 000 m²
+    assert big["success"], big
+    await hass.async_block_till_done()
+    state = hass.states.get(OURS)
+    assert state.state == "home"
+    assert state.attributes["box_zone"] is None
+
+
+def _ring(n: int) -> list[list[float]]:
+    return [at(HOME, math.cos(k / n * 2 * math.pi) * 100, math.sin(k / n * 2 * math.pi) * 100) for k in range(n)]
+
+
+@pytest.mark.parametrize(("points", "message"), [
+    ([at(HOME, 0, 0), at(HOME, 10, 10), at(HOME, 10, 0), at(HOME, 0, 10)], "The outline crosses itself"),
+    ([at(HOME, 0, 0), at(HOME, 10, 0)], "3 to 100 corners"),
+    (_ring(101), "3 to 100 corners"),
+    ([at(HOME, 0, 0), at(HOME, 1.5, 0), at(HOME, 1.5, 1.5), at(HOME, 0, 1.5)], "at least 4 m²"),
+    ([at(HOME, 0, 0), at(HOME, 60_000, 0), at(HOME, 60_000, 50)], "50 km across"),
+])
+async def test_bad_polygon_is_refused(hass: HomeAssistant, hass_ws_client, points, message) -> None:
+    await setup(hass)
+    client = await hass_ws_client(hass)
+    msg = await save(client, {"name": "Bad", "shape": "polygon", "points": points})
+    assert not msg["success"]
+    assert msg["error"]["code"] == "invalid_zone"
+    assert message in msg["error"]["message"]
+    await client.send_json_auto_id({"type": "box_zones/get"})
+    assert (await client.receive_json())["result"]["zones"] == []
+    # A good polygon with 100 corners is fine.
+    assert (await save(client, {"name": "Round", "shape": "polygon", "points": _ring(100)}))["success"]
+
+
+async def test_version_1_boxes_load_as_rectangles(hass: HomeAssistant, hass_ws_client, hass_storage) -> None:
+    """Boxes saved by 0.3.x (storage version 1, no shape) load unchanged; the next save writes version 2."""
+    old = {"id": "abc", **BOX, "width_m": 20.5, "rotation_deg": 12.25}
+    hass_storage["box_zones.zones"] = {"version": 1, "minor_version": 1, "key": "box_zones.zones",
+                                       "data": {"zones": [old]}}
+    car_at(hass, 52.5163, 13.3777)
+    await setup(hass)
+    assert hass.states.get(OURS).state == "Parking"
+    box = hass.states.get(BOX_SENSOR)
+    assert box.attributes["shape"] == "rectangle"
+    assert box.attributes["area_m2"] == 820
+    assert box.attributes["rotation_deg"] == 12.25
+
+    client = await hass_ws_client(hass)
+    await client.send_json_auto_id({"type": "box_zones/get"})
+    assert (await client.receive_json())["result"]["zones"] == [{**old, "shape": "rectangle"}]
+
+    await add_box(hass, client, name="Other")
+    stored = hass_storage["box_zones.zones"]
+    assert stored["version"] == 2
+    assert stored["data"]["zones"][0] == {**old, "shape": "rectangle"}
+
+
+async def test_newer_storage_version_is_not_loaded(hass: HomeAssistant, hass_storage) -> None:
+    """Boxes saved by a newer Box Zones (a higher major version) are refused, not loaded and overwritten."""
+    newer = {"version": 3, "minor_version": 1, "key": "box_zones.zones",
+             "data": {"zones": [{"id": "abc", **BOX, "shape": "blob"}]}}
+    hass_storage["box_zones.zones"] = newer
+    hass.config.latitude, hass.config.longitude = HOME
+    entry = MockConfigEntry(domain=DOMAIN, title="Box Zones", data={}, version=1, minor_version=2,
+                            subentries_data=[tracker_subentry(hass, CAR)])
+    entry.add_to_hass(hass)
+    assert not await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    assert entry.state is config_entries.ConfigEntryState.SETUP_ERROR
+    assert hass_storage["box_zones.zones"] == newer
+    assert hass.states.get(OURS) is None
+
+
+async def test_newer_minor_storage_version_loads(hass: HomeAssistant, hass_storage) -> None:
+    """A newer minor version of storage version 2 still loads (minor bumps stay readable)."""
+    hass_storage["box_zones.zones"] = {"version": 2, "minor_version": 5, "key": "box_zones.zones",
+                                       "data": {"zones": [{"id": "abc", **BOX, "shape": "rectangle"}]}}
+    car_at(hass, 52.5163, 13.3777)
+    await setup(hass)
+    assert hass.states.get(OURS).state == "Parking"

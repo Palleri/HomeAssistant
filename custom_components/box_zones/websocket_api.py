@@ -13,7 +13,7 @@ from homeassistant.helpers import entity_registry as er
 
 from .config_flow import clean_trackers, followed, tracker_subentry
 from .const import CONF_ENTITY_ID, DOMAIN, SUBENTRY_TRACKER, VERSION
-from .geometry import MAX_SIZE_M, MIN_SIZE_M, ZoneError
+from .geometry import MAX_CORNERS, MAX_SIZE_M, MIN_AREA_M2, MIN_SIZE_M, ZoneError
 from .store import ZoneStore
 
 
@@ -42,7 +42,12 @@ def _payload(hass: HomeAssistant, entry: ConfigEntry) -> dict[str, Any]:
         "version": VERSION,
         "zones": entry.runtime_data.zones,
         "trackers": trackers,
-        "limits": {"min_size_m": MIN_SIZE_M, "max_size_m": MAX_SIZE_M},
+        "limits": {
+            "min_size_m": MIN_SIZE_M,
+            "max_size_m": MAX_SIZE_M,
+            "max_corners": MAX_CORNERS,
+            "min_area_m2": MIN_AREA_M2,
+        },
     }
 
 
