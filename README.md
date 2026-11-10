@@ -132,6 +132,10 @@ To trigger when the car leaves, use `from: Parking` instead.
   the map switches to satellite images (Esri), which helps when drawing
   parking spots. Everything else runs locally in Home Assistant.
 - The Box Zones page is for admins only.
+- **After updating:** reload the Box Zones page (or close and reopen the
+  Home Assistant app). A page that stayed open keeps running the old version,
+  even after Home Assistant restarts. From 0.4.2 on the page tells you so and
+  has a **Reload** button.
 - Your boxes are stored in `/config/.storage/box_zones.zones` and are part of
   normal Home Assistant backups.
 - **Going back to 0.3.x:** once 0.4.0 has saved your boxes, the file is in
