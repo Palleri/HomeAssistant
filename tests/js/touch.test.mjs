@@ -80,6 +80,53 @@ async function dragInside(browser, port, id) {
   }
 }
 
+/**
+ * The same drag, with each touch event sent before its pointer event, which some
+ * browsers do. Leaflet then starts panning before the panel sees the pointerdown.
+ */
+async function dragInsideTouchFirst(browser, port, id) {
+  const ctx = await browser.newContext({ ...playwright.devices["Pixel 7"] });
+  try {
+    const page = await ctx.newPage();
+    await page.route(/^https?:\/\/(?!127\.0\.0\.1)/, (r) => r.fulfill({ status: 404 }));
+    await page.goto(`http://127.0.0.1:${port}/`);
+    await page.waitForFunction(() => window.panel && window.panel._map && window.panel._mode.view === "list");
+    await page.evaluate((id) => window.panel._edit(id), id);
+    await page.waitForTimeout(400);
+    return await page.evaluate(async () => {
+      const P = window.panel;
+      const m = P._map, d = P._mode.draft;
+      P._mapEl.setPointerCapture = () => {}; // made-up pointers can't be captured
+      const mid = d.points
+        ? [d.points.reduce((s, q) => s + q[0], 0) / d.points.length, d.points.reduce((s, q) => s + q[1], 0) / d.points.length]
+        : [d.lat, d.lon];
+      const pt = m.latLngToContainerPoint(mid), r = P._mapEl.getBoundingClientRect();
+      const x0 = r.left + pt.x, y0 = r.top + pt.y;
+      const target = P.shadowRoot.elementFromPoint(x0, y0);
+      const center = m.getCenter(), draft = JSON.stringify(d);
+      const send = (type, ptype, x, y) => {
+        const t = new Touch({ identifier: 1, target, clientX: x, clientY: y });
+        const touches = type === "touchend" ? [] : [t];
+        target.dispatchEvent(new TouchEvent(type, { bubbles: true, cancelable: true, composed: true, touches, targetTouches: touches, changedTouches: [t] }));
+        target.dispatchEvent(new PointerEvent(ptype, { bubbles: true, cancelable: true, composed: true, pointerId: 7, pointerType: "touch", isPrimary: true, clientX: x, clientY: y, button: ptype === "pointermove" ? -1 : 0, buttons: ptype === "pointerup" ? 0 : 1 }));
+      };
+      const frame = () => new Promise((res) => requestAnimationFrame(() => res()));
+      send("touchstart", "pointerdown", x0, y0);
+      for (let i = 1; i <= 10; i++) { send("touchmove", "pointermove", x0 + 6 * i, y0 + 4 * i); await frame(); }
+      send("touchend", "pointerup", x0 + 60, y0 + 40);
+      await frame();
+      const c = m.getCenter();
+      return {
+        mapMoved: c.lat !== center.lat || c.lng !== center.lng,
+        boxMoved: JSON.stringify(P._mode.draft) !== draft,
+        mapDraggable: m.dragging.enabled(),
+      };
+    });
+  } finally {
+    await ctx.close();
+  }
+}
+
 test("a finger dragged inside a box moves the box and not the map", { skip: !playwright && "Playwright is not installed" }, async (t) => {
   const server = await serve();
   const browser = await playwright.chromium.launch();
@@ -88,6 +135,10 @@ test("a finger dragged inside a box moves the box and not the map", { skip: !pla
       await t.test(id, async () => {
         const r = await dragInside(browser, server.address().port, id);
         assert.deepEqual(r, { mapMoved: false, boxMoved: true });
+      });
+      await t.test(`${id}, touch events before pointer events`, async () => {
+        const r = await dragInsideTouchFirst(browser, server.address().port, id);
+        assert.deepEqual(r, { mapMoved: false, boxMoved: true, mapDraggable: true });
       });
     }
   } finally {
