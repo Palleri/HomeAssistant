@@ -161,6 +161,10 @@ section + section { border-top: 1px solid var(--divider-color, #e0e0e0); }
 h2 { font-size: 16px; font-weight: 500; margin: 0; }
 p { margin: 0 0 12px; }
 .hint { color: var(--secondary-text-color); font-size: 14px; line-height: 1.45; }
+.zb-update { display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: var(--warning-color, #ffa600); color: #000; font-size: 14px; }
+.zb-update[hidden] { display: none; }
+.zb-update span { flex: 1; }
+.zb-update button { background: #000; color: #fff; border: none; }
 .error { background: var(--error-color, #db4437); color: #fff; border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; font-size: 14px; }
 
 button { font: inherit; font-size: 14px; font-weight: 500; border-radius: 18px; padding: 0 16px; height: 36px; cursor: pointer;
@@ -275,7 +279,14 @@ class BoxZonesPanel extends HTMLElement {
     if (this._menu) this._menu.narrow = this._narrow;
     if (this._map) setTimeout(() => this._map.invalidateSize(), 0);
   }
-  set panel(_v) {}
+  set panel(v) {
+    // Home Assistant's Box Zones version. A page left open across an update (the app on a
+    // phone keeps it for days) goes on running the old panel code, even after Home
+    // Assistant restarts, until the page is reloaded.
+    const running = v && v.config && v.config.version;
+    this._newerVersion = running && VERSION !== "dev" && running !== VERSION ? running : null;
+    this._syncUpdate();
+  }
   set route(_v) {}
 
   connectedCallback() {
@@ -289,6 +300,13 @@ class BoxZonesPanel extends HTMLElement {
     window.removeEventListener("keydown", this._onKey);
     window.removeEventListener("pointerup", this._onPointerEnd, true);
     window.removeEventListener("pointercancel", this._onPointerEnd, true);
+  }
+
+  _syncUpdate() {
+    if (!this._update) return;
+    this._update.hidden = !this._newerVersion;
+    this._update.firstChild.textContent = this._newerVersion
+      ? `Box Zones was updated to ${this._newerVersion}. Reload the page to use it.` : "";
   }
 
   // ---------------------------------------------------------------- setup
@@ -310,6 +328,10 @@ class BoxZonesPanel extends HTMLElement {
         h("div", { class: "main" },
           h("aside", { class: "side" }, this._side),
           h("div", { class: "mapwrap" }, this._mapEl, this._mapMsg))));
+    this._update = h("div", { class: "zb-update", role: "status", hidden: true },
+      h("span", {}), h("button", { onclick: () => location.reload() }, "Reload"));
+    root.querySelector(".toolbar").after(this._update);
+    this._syncUpdate();
     this._render();
 
     try {
