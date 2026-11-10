@@ -147,6 +147,10 @@ pytest
 node --test tests/js/*.test.mjs
 ```
 
+`tests/js/touch.test.mjs` drags a finger across the map in a real browser and is
+skipped unless Playwright with Chromium is installed
+(`npm i playwright && npx playwright install chromium`).
+
 The box maths exists twice, in `geometry.py` (for the entities) and
 `frontend/geo.js` (for the map). A test checks that they agree.
 
