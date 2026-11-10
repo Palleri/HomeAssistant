@@ -380,6 +380,16 @@ class BoxZonesPanel extends HTMLElement {
     this._mapEl.addEventListener("pointermove", (e) => this._onPointerMove(e), true);
     this._mapEl.addEventListener("pointerup", (e) => this._onPointerUp(e), true);
     this._mapEl.addEventListener("pointercancel", (e) => this._onPointerUp(e), true);
+    // On a touch device Leaflet drags and pinches on the browser's own touch events,
+    // which stopping pointerdown does not stop: while a finger moves or turns the box,
+    // keep them from Leaflet too, or the map pans under the box.
+    const keepTouch = (e) => {
+      if (!this._gesture) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    };
+    this._mapEl.addEventListener("touchstart", keepTouch, { capture: true, passive: false });
+    this._mapEl.addEventListener("touchmove", keepTouch, { capture: true, passive: false });
     new ResizeObserver(() => map.invalidateSize()).observe(this._mapEl);
   }
 
