@@ -380,6 +380,9 @@ class BoxZonesPanel extends HTMLElement {
     this._mapEl.addEventListener("pointermove", (e) => this._onPointerMove(e), true);
     this._mapEl.addEventListener("pointerup", (e) => this._onPointerUp(e), true);
     this._mapEl.addEventListener("pointercancel", (e) => this._onPointerUp(e), true);
+    for (const type of ["touchstart", "touchmove"]) {
+      this._mapEl.addEventListener(type, (e) => this._onTouchDuringGesture(e), { capture: true, passive: false });
+    }
     new ResizeObserver(() => map.invalidateSize()).observe(this._mapEl);
   }
 
@@ -1073,6 +1076,33 @@ class BoxZonesPanel extends HTMLElement {
       startAngle: Math.atan2(pt.y - c.y, pt.x - c.x),
     };
     this._mapEl.setPointerCapture(e.pointerId);
+    this._holdMap();
+  }
+
+  /**
+   * Keep the map still while a drag moves or turns the box. On phones Leaflet pans
+   * and pinch-zooms from touch events, which stopping the pointer event above does
+   * not stop. Disabling dragging also ends a pan Leaflet has already started (when
+   * a browser sends touchstart before pointerdown).
+   */
+  _holdMap() {
+    const held = [];
+    for (const h of [this._map.dragging, this._map.touchZoom]) {
+      if (h && h.enabled()) { h.disable(); held.push(h); }
+    }
+    this._heldMap = held;
+  }
+
+  _releaseMap() {
+    for (const h of this._heldMap || []) h.enable();
+    this._heldMap = null;
+  }
+
+  /** While a box gesture is under way, touch events don't reach Leaflet. */
+  _onTouchDuringGesture(e) {
+    if (!this._gesture) return;
+    e.stopPropagation();
+    if (e.type === "touchmove" && e.cancelable) e.preventDefault();
   }
 
   _onPointerMove(e) {
@@ -1109,6 +1139,7 @@ class BoxZonesPanel extends HTMLElement {
     if (!g || e.pointerId !== g.pointerId) return;
     e.stopImmediatePropagation();
     this._gesture = null;
+    this._releaseMap();
     if (this._mapEl.hasPointerCapture(e.pointerId)) this._mapEl.releasePointerCapture(e.pointerId);
     this._placeHandles(); // the turn button goes back next to the box
     this._updateFields();
